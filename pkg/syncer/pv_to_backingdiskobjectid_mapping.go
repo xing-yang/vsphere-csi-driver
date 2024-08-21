@@ -95,7 +95,8 @@ func csiGetPVtoBackingDiskObjectIdMapping(ctx context.Context, k8sclient clients
 		}
 		val, ok := vol.BackingObjectDetails.(*cnstypes.CnsBlockBackingDetails)
 		if ok {
-			volumeIdToBackingObjectIdMap[vol.VolumeId.Id] = val.BackingDiskObjectId
+			volumeIdToBackingObjectIdMap[vol.VolumeId.Id] = val.BackingDiskObjectId + "|" + val.BackingDiskId + "|" + val.BackingDiskPath
+			log.Debugf("SRM test: csiGetPVtoBackingDiskObjectIdMapping: volumeIdToBackingObjectId|BackingDiskId|BackingDiskPath Map: %v. val.BackingDiskPath: %v", volumeIdToBackingObjectIdMap[vol.VolumeId.Id], val.BackingDiskPath)
 		}
 	}
 
