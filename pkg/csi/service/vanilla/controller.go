@@ -2291,7 +2291,7 @@ func (c *controller) ControllerPublishVolume(ctx context.Context, req *csi.Contr
 				return nil, csifault.CSIInternalFault, logger.LogNewErrorCodef(log, codes.Internal,
 					"failed to find VirtualMachine for node:%q. Error: %v", req.NodeId, err)
 			}
-			log.Debugf("Found VirtualMachine for node:%q.", req.NodeId)
+			log.Infof("XY: Found VirtualMachine for node:%q. NodeVM: %v", req.NodeId, nodevm)
 			// faultType is returned from manager.AttachVolume.
 			diskUUID, faultType, err := common.AttachVolumeUtil(ctx, volumeManager, nodevm, req.VolumeId,
 				false)
