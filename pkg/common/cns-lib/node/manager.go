@@ -169,12 +169,14 @@ func (m *defaultManager) GetNodeVMByNameAndUpdateCache(ctx context.Context,
 func (m *defaultManager) GetNodeVMByNameOrUUID(
 	ctx context.Context, nodeNameOrUUID string) (*vsphere.VirtualMachine, error) {
 	log := logger.GetLogger(ctx)
+	log.Infof("GetNodeVMByNameOrUUID: input nodeNameOrUUID: %q", nodeNameOrUUID)
 	nodeUUID, found := m.nodeNameToUUID.Load(nodeNameOrUUID)
 	if !found {
 		log.Errorf("Node not found with nodeName %s", nodeNameOrUUID)
 		return nil, ErrNodeNotFound
 	}
 	if nodeUUID != nil && nodeUUID.(string) != "" {
+		log.Infof("GetNodeVMByNameOrUUID: input nodeNameOrUUID: %q, nodeUUID: %s", nodeNameOrUUID, nodeUUID.(string))
 		return m.GetNodeVMAndUpdateCache(ctx, nodeUUID.(string), nil)
 	}
 	log.Infof("Empty nodeUUID observed in cache for the node: %q", nodeNameOrUUID)
@@ -183,6 +185,7 @@ func (m *defaultManager) GetNodeVMByNameOrUUID(
 		log.Errorf("failed to get node UUID from node: %q. Err: %v", nodeNameOrUUID, err)
 		return nil, err
 	}
+	log.Infof("GetNodeVMByNameOrUUID: input nodeNameOrUUID: %q, k8snodeUUID: %v", nodeNameOrUUID, k8snodeUUID)
 	return m.GetNodeVMAndUpdateCache(ctx, k8snodeUUID, nil)
 }
 
@@ -219,6 +222,7 @@ func (m *defaultManager) GetK8sNode(ctx context.Context, nodename string) (*v1.N
 func (m *defaultManager) GetNodeVMAndUpdateCache(ctx context.Context,
 	nodeUUID string, dc *vsphere.Datacenter) (*vsphere.VirtualMachine, error) {
 	log := logger.GetLogger(ctx)
+	log.Infof("GetNodeVMAndUpdateCache: input nodeUUID %s", nodeUUID)
 	vmInf, discovered := m.nodeVMs.Load(nodeUUID)
 	if !discovered {
 		log.Infof("Node hasn't been discovered yet with nodeUUID %s", nodeUUID)

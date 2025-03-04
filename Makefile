@@ -141,7 +141,7 @@ CONTROLLER_GEN=$(shell which controller-gen)
 endif
 
 $(SYNCER_BIN): $(SYNCER_BIN_SRCS) syncer_manifest
-	CGO_ENABLED=0 GOOS=$(GOOS) GOARCH=$(GOARCH) go build -mod vendor -ldflags '$(LDFLAGS_SYNCER)' -o $(abspath $@) $<
+	CGO_ENABLED=0 GOOS=$(GOOS) GOARCH=$(GOARCH) go build -ldflags '$(LDFLAGS_SYNCER)' -o $(abspath $@) $<
 	@touch $@
 
 # The default build target.

@@ -20,7 +20,7 @@ require (
 	github.com/prometheus/client_golang v1.18.0
 	github.com/stretchr/testify v1.9.0
 	github.com/vmware-tanzu/vm-operator/api v1.8.2
-	github.com/vmware/govmomi v0.37.3
+	github.com/vmware/govmomi v0.31.1-0.20240830162618-a56e33d3b680
 	go.uber.org/zap v1.26.0
 	golang.org/x/crypto v0.23.0
 	golang.org/x/sync v0.8.0
