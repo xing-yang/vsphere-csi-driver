@@ -29,14 +29,19 @@ import (
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	"github.com/google/uuid"
 	"github.com/vmware/govmomi/find"
+	"github.com/vmware/govmomi/object"
 	"github.com/vmware/govmomi/pbm"
 	v1 "k8s.io/api/core/v1"
 
+	"github.com/agiledragon/gomonkey/v2"
+	"github.com/stretchr/testify/assert"
 	cnstypes "github.com/vmware/govmomi/cns/types"
+	"github.com/vmware/govmomi/vim25/types"
 	cnsvolume "sigs.k8s.io/vsphere-csi-driver/v3/pkg/common/cns-lib/volume"
 	cnsvsphere "sigs.k8s.io/vsphere-csi-driver/v3/pkg/common/cns-lib/vsphere"
 	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/common/config"
 	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/common/unittestcommon"
+	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/common/utils"
 	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/csi/service/common"
 	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/csi/service/common/commonco"
 )
@@ -1615,5 +1620,127 @@ func TestWCPExpandVolumeWithSnapshots(t *testing.T) {
 
 	if len(queryResult.Volumes) != 0 {
 		t.Fatalf("Volume should not exist after deletion with ID: %s", volID)
+	}
+}
+
+func TestCreateBlockVolumeInternal(t *testing.T) {
+	ct := getControllerTest(t)
+	dummyDatastoreURL := "ds:///vmfs/volumes/5f3c1b0c-1b1c7c1e-5b1a-02002b3a4a56/"
+	dummyDatastore := &cnsvsphere.DatastoreInfo{
+		Info: &types.DatastoreInfo{
+			Name: "vsanDatastore",
+			Url:  dummyDatastoreURL,
+		},
+		Datastore: &cnsvsphere.Datastore{
+			Datastore: object.NewDatastore(nil, types.ManagedObjectReference{
+				Type:  "Datastore",
+				Value: "datastore-123",
+			}),
+		},
+	}
+	tests := []struct {
+		name                      string
+		volFromSnapshotOnTargetDs bool
+		assertion                 func(*testing.T, *cnstypes.CnsVolumeCreateSpec)
+	}{
+		{
+			name:                      "feature enabled",
+			volFromSnapshotOnTargetDs: true,
+			assertion: func(t *testing.T, createSpec *cnstypes.CnsVolumeCreateSpec) {
+				// Datastores should not be overwritten
+				assert.NotEqual(t, dummyDatastore.Info.Url, createSpec.Datastores[0].Value)
+			},
+		},
+		{
+			name:                      "feature disabled",
+			volFromSnapshotOnTargetDs: false,
+			assertion: func(t *testing.T, createSpec *cnstypes.CnsVolumeCreateSpec) {
+				// Datastores should be overwritten
+				assert.Equal(t, "vsan:"+dummyDatastore.Info.Url, createSpec.Datastores[0].Value)
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Mock IsFSSEnabled to control the feature flag
+			patches := gomonkey.ApplyFunc(commonco.ContainerOrchestratorUtility.IsFSSEnabled,
+				func(ctx context.Context, featureName string) bool {
+					if featureName == common.VolFromSnapshotOnTargetDs {
+						return tt.volFromSnapshotOnTargetDs
+					}
+					return true // Enable other features by default
+				})
+			defer patches.Reset()
+
+			// Mock getCandidateDatastores to return a dummy datastore
+			patches.ApplyFunc(getCandidateDatastores,
+				func(ctx context.Context, vc *cnsvsphere.VirtualCenter, clusterMoID string, filterSuspendedDatastores bool) (
+					[]*cnsvsphere.DatastoreInfo, []*cnsvsphere.DatastoreInfo, error) {
+					return []*cnsvsphere.DatastoreInfo{dummyDatastore}, nil, nil
+				})
+
+			// Mock QueryVolumeDetailsUtil to return dummy volume details
+			patches.ApplyFunc(utils.QueryVolumeDetailsUtil, func(ctx context.Context, volManager cnsvolume.Manager,
+				volIDs []cnstypes.CnsVolumeId) (map[string]*utils.CnsVolumeDetails, error) {
+				details := make(map[string]*utils.CnsVolumeDetails)
+				for _, volID := range volIDs {
+					details[volID.Id] = &utils.CnsVolumeDetails{
+						SizeInMB: 1,
+					}
+				}
+				return details, nil
+			})
+
+			// Mock CreateBlockVolumeUtil to inspect the createSpec
+			var capturedCreateSpec *cnstypes.CnsVolumeCreateSpec
+			patches.ApplyFunc(common.CreateBlockVolumeUtil,
+				func(ctx context.Context, clusterFlavor cnstypes.CnsClusterFlavor, manager *common.Manager,
+					spec *common.CreateVolumeSpec, sharedDatastores []*cnsvsphere.DatastoreInfo,
+					opts common.CreateBlockVolumeOptions, extraParams interface{}) (*cnsvolume.CnsVolumeInfo, string, error) {
+
+					// This is where we would normally call the real function,
+					// but we need to capture the spec. For this test, we create a dummy spec.
+					createSpec := &cnstypes.CnsVolumeCreateSpec{
+						Name:       spec.Name,
+						VolumeType: spec.VolumeType,
+						Datastores: []types.ManagedObjectReference{{Type: "Datastore", Value: "original-datastore"}},
+					}
+					if !opts.VolFromSnapshotOnTargetDs {
+						// Simulate the overwrite logic
+						createSpec.Datastores = []types.ManagedObjectReference{{Type: "Datastore", Value: "vsan:" + dummyDatastore.Info.Url}}
+					}
+					capturedCreateSpec = createSpec
+
+					return &cnsvolume.CnsVolumeInfo{VolumeID: cnstypes.CnsVolumeId{Id: "dummy-volume-id"}}, "", nil
+				})
+			snapshotID := uuid.New().String() + "+" + uuid.New().String()
+			req := &csi.CreateVolumeRequest{
+				Name: "test-vol",
+				VolumeContentSource: &csi.VolumeContentSource{
+					Type: &csi.VolumeContentSource_Snapshot{
+						Snapshot: &csi.VolumeContentSource_SnapshotSource{
+							SnapshotId: snapshotID,
+						},
+					},
+				},
+				CapacityRange: &csi.CapacityRange{RequiredBytes: 1 * 1024 * 1024},
+				VolumeCapabilities: []*csi.VolumeCapability{
+					{
+						AccessMode: &csi.VolumeCapability_AccessMode{
+							Mode: csi.VolumeCapability_AccessMode_SINGLE_NODE_WRITER,
+						},
+					},
+				},
+				Parameters: map[string]string{
+					common.AttributeStoragePolicyName: "test-policy",
+				},
+			}
+
+			_, _, err := ct.controller.createBlockVolume(context.Background(), req, false, []string{"cluster-1"})
+			assert.NoError(t, err)
+			assert.NotNil(t, capturedCreateSpec)
+			tt.assertion(t, capturedCreateSpec)
+		})
 	}
 }
