@@ -31,6 +31,7 @@ import (
 	vim25types "github.com/vmware/govmomi/vim25/types"
 	corev1 "k8s.io/api/core/v1"
 	storagev1 "k8s.io/api/storage/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -966,6 +967,179 @@ func validatePVCStorageClass(pvc *corev1.PersistentVolumeClaim, expectedStorageC
 
 	return nil
 }
+
+var _ = Describe("validatePVCSize", func() {
+	var (
+		ctx          context.Context
+		pvc          *corev1.PersistentVolumeClaim
+		capacityInMb int64
+		pvcName      string
+	)
+
+	BeforeEach(func() {
+		ctx = context.Background()
+		pvcName = "test-pvc"
+		capacityInMb = 1024 // 1GB
+	})
+
+	Context("when PVC has no resource requests", func() {
+		BeforeEach(func() {
+			pvc = &corev1.PersistentVolumeClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      pvcName,
+					Namespace: "default",
+				},
+				Spec: corev1.PersistentVolumeClaimSpec{
+					Resources: corev1.VolumeResourceRequirements{},
+				},
+			}
+		})
+
+		It("should return nil (skip validation)", func() {
+			err := validatePVCSize(ctx, pvc, capacityInMb, pvcName)
+			Expect(err).To(BeNil())
+		})
+	})
+
+	Context("when PVC has zero storage request", func() {
+		BeforeEach(func() {
+			pvc = &corev1.PersistentVolumeClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      pvcName,
+					Namespace: "default",
+				},
+				Spec: corev1.PersistentVolumeClaimSpec{
+					Resources: corev1.VolumeResourceRequirements{
+						Requests: corev1.ResourceList{
+							corev1.ResourceStorage: resource.MustParse("0"),
+						},
+					},
+				},
+			}
+		})
+
+		It("should return nil (skip validation)", func() {
+			err := validatePVCSize(ctx, pvc, capacityInMb, pvcName)
+			Expect(err).To(BeNil())
+		})
+	})
+
+	Context("when PVC size matches volume capacity", func() {
+		BeforeEach(func() {
+			// 1GB = 1024MB = 1024 * 1024 * 1024 bytes
+			expectedSize := resource.MustParse("1Gi")
+			pvc = &corev1.PersistentVolumeClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      pvcName,
+					Namespace: "default",
+				},
+				Spec: corev1.PersistentVolumeClaimSpec{
+					Resources: corev1.VolumeResourceRequirements{
+						Requests: corev1.ResourceList{
+							corev1.ResourceStorage: expectedSize,
+						},
+					},
+				},
+			}
+		})
+
+		It("should return nil (validation passes)", func() {
+			err := validatePVCSize(ctx, pvc, capacityInMb, pvcName)
+			Expect(err).To(BeNil())
+		})
+	})
+
+	Context("when PVC size does not match volume capacity", func() {
+		Context("when PVC requests 2Gi but volume is 1Gi", func() {
+			BeforeEach(func() {
+				// Request 2GB but volume is 1GB
+				wrongSize := resource.MustParse("2Gi")
+				pvc = &corev1.PersistentVolumeClaim{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      pvcName,
+						Namespace: "default",
+					},
+					Spec: corev1.PersistentVolumeClaimSpec{
+						Resources: corev1.VolumeResourceRequirements{
+							Requests: corev1.ResourceList{
+								corev1.ResourceStorage: wrongSize,
+							},
+						},
+					},
+				}
+			})
+
+			It("should return error with size mismatch details", func() {
+				err := validatePVCSize(ctx, pvc, capacityInMb, pvcName)
+				Expect(err).ToNot(BeNil())
+				Expect(err.Error()).To(ContainSubstring("requested size 2Gi"))
+				Expect(err.Error()).To(ContainSubstring("does not match volume capacity 1Gi"))
+				Expect(err.Error()).To(ContainSubstring(pvcName))
+			})
+		})
+
+		Context("when PVC requests 512Mi but volume is 1Gi", func() {
+			BeforeEach(func() {
+				// Request 512MB but volume is 1GB
+				wrongSize := resource.MustParse("512Mi")
+				pvc = &corev1.PersistentVolumeClaim{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      pvcName,
+						Namespace: "default",
+					},
+					Spec: corev1.PersistentVolumeClaimSpec{
+						Resources: corev1.VolumeResourceRequirements{
+							Requests: corev1.ResourceList{
+								corev1.ResourceStorage: wrongSize,
+							},
+						},
+					},
+				}
+			})
+
+			It("should return error with size mismatch details", func() {
+				err := validatePVCSize(ctx, pvc, capacityInMb, pvcName)
+				Expect(err).ToNot(BeNil())
+				Expect(err.Error()).To(ContainSubstring("requested size 512Mi"))
+				Expect(err.Error()).To(ContainSubstring("does not match volume capacity 1Gi"))
+				Expect(err.Error()).To(ContainSubstring(pvcName))
+			})
+		})
+
+		Context("when PVC requests 1000 bytes but volume is 1024 bytes", func() {
+			var smallCapacityInMb int64
+
+			BeforeEach(func() {
+				// Volume capacity is 1024 bytes = 1024/1024/1024 MB ≈ 0.0009765625 MB
+				// Since we need to work with MB precision, let's use 1 MB (1048576 bytes) for volume
+				// and request 1000000 bytes (1MB in decimal)
+				smallCapacityInMb = 1                      // 1 MB = 1048576 bytes
+				wrongSize := resource.MustParse("1000000") // 1000000 bytes
+				pvc = &corev1.PersistentVolumeClaim{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      pvcName,
+						Namespace: "default",
+					},
+					Spec: corev1.PersistentVolumeClaimSpec{
+						Resources: corev1.VolumeResourceRequirements{
+							Requests: corev1.ResourceList{
+								corev1.ResourceStorage: wrongSize,
+							},
+						},
+					},
+				}
+			})
+
+			It("should return error with size mismatch details", func() {
+				err := validatePVCSize(ctx, pvc, smallCapacityInMb, pvcName)
+				Expect(err).ToNot(BeNil())
+				Expect(err.Error()).To(ContainSubstring("requested size 1M"))
+				Expect(err.Error()).To(ContainSubstring("does not match volume capacity 1Mi"))
+				Expect(err.Error()).To(ContainSubstring(pvcName))
+			})
+		})
+	})
+})
 
 var _ = Describe("PVC Storage Class Validation", func() {
 	var (

@@ -583,6 +583,21 @@ func (r *ReconcileCnsRegisterVolume) Reconcile(ctx context.Context,
 	if accessMode == "" && instance.Spec.DiskURLPath != "" {
 		accessMode = v1.ReadWriteOnce
 	}
+
+	// Validate that existing PVC's requested size matches the volume capacity
+	if pvc != nil {
+		err = validatePVCSize(ctx, pvc, capacityInMb, instance.Spec.PvcName)
+		if err != nil {
+			log.Error(err.Error())
+			setInstanceError(ctx, r, instance, err.Error())
+			// Untag the CNS volume which was created previously.
+			_, delErr := common.DeleteVolumeUtil(ctx, r.volumeManager, volumeID, false)
+			if delErr != nil {
+				log.Errorf("Failed to untag CNS volume: %s with error: %+v", volumeID, delErr)
+			}
+			return reconcile.Result{RequeueAfter: timeout}, nil
+		}
+	}
 	pv, err := k8sclient.CoreV1().PersistentVolumes().Get(ctx, pvName, metav1.GetOptions{})
 	if err != nil {
 		if apierrors.IsNotFound(err) {
@@ -1047,6 +1062,35 @@ func recordEvent(ctx context.Context, r *ReconcileCnsRegisterVolume,
 		r.recorder.Event(instance, v1.EventTypeNormal, "CnsRegisterVolumeSucceeded", msg)
 		backOffDurationMapMutex.Unlock()
 	}
+}
+
+// validatePVCSize validates that the existing PVC's requested size matches the volume capacity.
+func validatePVCSize(ctx context.Context, pvc *v1.PersistentVolumeClaim, capacityInMb int64, pvcName string) error {
+	log := logger.GetLogger(ctx)
+
+	if pvc.Spec.Resources.Requests == nil {
+		log.Debugf("PVC %s has no resource requests, skipping size validation", pvcName)
+		return nil
+	}
+
+	pvcRequestedSize := pvc.Spec.Resources.Requests[v1.ResourceStorage]
+	if pvcRequestedSize.IsZero() {
+		log.Debugf("PVC %s has no storage size request, skipping size validation", pvcName)
+		return nil
+	}
+
+	volumeCapacityInBytes := capacityInMb * common.MbInBytes
+	volumeCapacity := resource.NewQuantity(volumeCapacityInBytes, resource.BinarySI)
+
+	// Compare the requested size with volume capacity
+	if pvcRequestedSize.Cmp(*volumeCapacity) != 0 {
+		return fmt.Errorf("PVC %s requested size %s does not match volume capacity %s",
+			pvcName, pvcRequestedSize.String(), volumeCapacity.String())
+	}
+
+	log.Infof("PVC %s requested size %s matches volume capacity %s",
+		pvcName, pvcRequestedSize.String(), volumeCapacity.String())
+	return nil
 }
 
 // updateCnsRegisterVolume updates the CnsRegisterVolume instance in K8S.
