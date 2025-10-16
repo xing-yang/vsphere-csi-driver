@@ -103,6 +103,7 @@ type controller struct {
 	authMgr     common.AuthorizationService
 	topologyMgr commoncotypes.ControllerTopologyService
 	csi.UnimplementedControllerServer
+	csi.UnimplementedSnapshotMetadataServer
 }
 
 // New creates a CNS controller.
@@ -2679,6 +2680,222 @@ func (c *controller) ListSnapshots(ctx context.Context, req *csi.ListSnapshotsRe
 	return resp, err
 }
 
+// GetMetadataAllocated returns the allocated blocks for a snapshot
+func (c *controller) GetMetadataAllocated(ctx context.Context, req *csi.GetMetadataAllocatedRequest) (
+	*csi.GetMetadataAllocatedResponse, error) {
+
+	ctx = logger.NewContextWithLogger(ctx)
+	log := logger.GetLogger(ctx)
+	log.Infof("GetMetadataAllocated: called with args %+v", req)
+
+	// Check if Changed Block Tracking feature is enabled
+	isChangedBlockTrackingEnabled := commonco.ContainerOrchestratorUtility.IsFSSEnabled(ctx, common.ChangedBlockTracking)
+	if !isChangedBlockTrackingEnabled {
+		return nil, logger.LogNewErrorCode(log, codes.Unimplemented, "GetMetadataAllocated")
+	}
+
+	start := time.Now()
+	volumeType := prometheus.PrometheusBlockVolumeType
+
+	getMetadataAllocatedInternal := func() (*csi.GetMetadataAllocatedResponse, error) {
+		// Validate request
+		if err := validateGetMetadataAllocatedRequest(ctx, req); err != nil {
+			return nil, logger.LogNewErrorCodef(log, codes.InvalidArgument,
+				"validation for GetMetadataAllocated Request: %+v has failed. Error: %v", req, err)
+		}
+
+		snapshotID := req.GetSnapshotId()
+		startingOffset := req.GetStartingOffset()
+		maxResults := req.GetMaxResults()
+
+		// Parse snapshot ID to get volume ID and snapshot handle
+		volumeID, cnsSnapshotID, err := common.ParseCSISnapshotID(snapshotID)
+		if err != nil {
+			return nil, logger.LogNewErrorCodef(log, codes.InvalidArgument,
+				"failed to parse snapshot ID %s: %v", snapshotID, err)
+		}
+
+		// Query volume details to get volume information
+		volumeIds := []cnstypes.CnsVolumeId{{Id: volumeID}}
+		cnsVolumeDetailsMap, err := utils.QueryVolumeDetailsUtil(ctx, c.manager.VolumeManager, volumeIds)
+		if err != nil {
+			return nil, logger.LogNewErrorCodef(log, codes.Internal,
+				"failed to query volume details for volume %s: %v", volumeID, err)
+		}
+
+		volumeDetails, exists := cnsVolumeDetailsMap[volumeID]
+		if !exists {
+			return nil, logger.LogNewErrorCodef(log, codes.NotFound,
+				"volume %s not found", volumeID)
+		}
+
+		// Ensure this is a block volume
+		if volumeDetails.VolumeType != common.BlockVolumeType {
+			return nil, logger.LogNewErrorCodef(log, codes.InvalidArgument,
+				"GetMetadataAllocated is only supported for block volumes, got volume type: %s",
+				volumeDetails.VolumeType)
+		}
+
+		// Call virtual-disks QueryAllocatedBlocks
+		allocatedBlocks, err := c.queryAllocatedBlocksFromVirtualDisks(ctx, volumeID, cnsSnapshotID,
+			uint64(startingOffset), uint32(maxResults))
+		if err != nil {
+			return nil, logger.LogNewErrorCodef(log, codes.Internal,
+				"failed to query allocated blocks: %v", err)
+		}
+
+		// Convert virtual-disks response to CSI response format
+		var blockMetadata []*csi.BlockMetadata
+		for _, area := range allocatedBlocks.AllocatedAreas {
+			blockMetadata = append(blockMetadata, &csi.BlockMetadata{
+				ByteOffset: int64(area.Offset),
+				SizeBytes:  int64(area.Length),
+			})
+		}
+
+		response := &csi.GetMetadataAllocatedResponse{
+			BlockMetadata:       blockMetadata,
+			VolumeCapacityBytes: volumeDetails.SizeInMB * common.MbInBytes,
+		}
+
+		// Set block metadata type
+		if len(blockMetadata) > 0 {
+			response.BlockMetadataType = csi.BlockMetadataType_FIXED_LENGTH
+		}
+
+		log.Infof("GetMetadataAllocated succeeded for snapshot %s, returned %d allocated blocks",
+			snapshotID, len(blockMetadata))
+
+		return response, nil
+	}
+
+	resp, err := getMetadataAllocatedInternal()
+	if err != nil {
+		prometheus.CsiControlOpsHistVec.WithLabelValues(volumeType, "GetMetadataAllocated",
+			prometheus.PrometheusFailStatus, "NotComputed").Observe(time.Since(start).Seconds())
+	} else {
+		prometheus.CsiControlOpsHistVec.WithLabelValues(volumeType, "GetMetadataAllocated",
+			prometheus.PrometheusPassStatus, "").Observe(time.Since(start).Seconds())
+	}
+
+	return resp, err
+}
+
+// GetMetadataDelta returns the delta (changed blocks) between two snapshots
+func (c *controller) GetMetadataDelta(ctx context.Context, req *csi.GetMetadataDeltaRequest) (
+	*csi.GetMetadataDeltaResponse, error) {
+
+	ctx = logger.NewContextWithLogger(ctx)
+	log := logger.GetLogger(ctx)
+	log.Infof("GetMetadataDelta: called with args %+v", req)
+
+	// Check if Changed Block Tracking feature is enabled
+	isChangedBlockTrackingEnabled := commonco.ContainerOrchestratorUtility.IsFSSEnabled(ctx, common.ChangedBlockTracking)
+	if !isChangedBlockTrackingEnabled {
+		return nil, logger.LogNewErrorCode(log, codes.Unimplemented, "GetMetadataDelta")
+	}
+
+	start := time.Now()
+	volumeType := prometheus.PrometheusBlockVolumeType
+
+	getMetadataDeltaInternal := func() (*csi.GetMetadataDeltaResponse, error) {
+		// Validate request
+		if err := validateGetMetadataDeltaRequest(ctx, req); err != nil {
+			return nil, logger.LogNewErrorCodef(log, codes.InvalidArgument,
+				"validation for GetMetadataDelta Request: %+v has failed. Error: %v", req, err)
+		}
+
+		baseSnapshotID := req.GetBaseSnapshotId()
+		targetSnapshotID := req.GetTargetSnapshotId()
+		startingOffset := req.GetStartingOffset()
+		maxResults := req.GetMaxResults()
+
+		// Parse snapshot IDs to get volume ID and snapshot handles
+		baseVolumeID, baseCNSSnapshotID, err := common.ParseCSISnapshotID(baseSnapshotID)
+		if err != nil {
+			return nil, logger.LogNewErrorCodef(log, codes.InvalidArgument,
+				"failed to parse base snapshot ID %s: %v", baseSnapshotID, err)
+		}
+
+		targetVolumeID, targetCNSSnapshotID, err := common.ParseCSISnapshotID(targetSnapshotID)
+		if err != nil {
+			return nil, logger.LogNewErrorCodef(log, codes.InvalidArgument,
+				"failed to parse target snapshot ID %s: %v", targetSnapshotID, err)
+		}
+
+		// Ensure both snapshots are from the same volume
+		if baseVolumeID != targetVolumeID {
+			return nil, logger.LogNewErrorCodef(log, codes.InvalidArgument,
+				"base snapshot %s and target snapshot %s are not from the same volume",
+				baseSnapshotID, targetSnapshotID)
+		}
+
+		// Query volume details to get volume information
+		volumeIds := []cnstypes.CnsVolumeId{{Id: baseVolumeID}}
+		cnsVolumeDetailsMap, err := utils.QueryVolumeDetailsUtil(ctx, c.manager.VolumeManager, volumeIds)
+		if err != nil {
+			return nil, logger.LogNewErrorCodef(log, codes.Internal,
+				"failed to query volume details for volume %s: %v", baseVolumeID, err)
+		}
+
+		volumeDetails, exists := cnsVolumeDetailsMap[baseVolumeID]
+		if !exists {
+			return nil, logger.LogNewErrorCodef(log, codes.NotFound,
+				"volume %s not found", baseVolumeID)
+		}
+
+		// Ensure this is a block volume
+		if volumeDetails.VolumeType != common.BlockVolumeType {
+			return nil, logger.LogNewErrorCodef(log, codes.InvalidArgument,
+				"GetMetadataDelta is only supported for block volumes, got volume type: %s",
+				volumeDetails.VolumeType)
+		}
+
+		// Call virtual-disks QueryChangedAreas
+		changedAreas, err := c.queryChangedAreasFromVirtualDisks(ctx, baseVolumeID, baseCNSSnapshotID,
+			targetCNSSnapshotID, uint64(startingOffset), uint32(maxResults))
+		if err != nil {
+			return nil, logger.LogNewErrorCodef(log, codes.Internal,
+				"failed to query changed areas: %v", err)
+		}
+
+		// Convert virtual-disks response to CSI response format
+		var blockMetadata []*csi.BlockMetadata
+		for _, area := range changedAreas.ChangedAreas {
+			blockMetadata = append(blockMetadata, &csi.BlockMetadata{
+				ByteOffset: int64(area.Offset),
+				SizeBytes:  int64(area.Length),
+			})
+		}
+
+		response := &csi.GetMetadataDeltaResponse{
+			BlockMetadata:       blockMetadata,
+			VolumeCapacityBytes: volumeDetails.SizeInMB * common.MbInBytes,
+		}
+
+		// Set block metadata type
+		if len(blockMetadata) > 0 {
+			response.BlockMetadataType = csi.BlockMetadataType_FIXED_LENGTH
+		}
+
+		log.Infof("GetMetadataDelta succeeded for base snapshot %s, target snapshot %s, returned %d changed blocks",
+			baseSnapshotID, targetSnapshotID, len(blockMetadata))
+
+		return response, nil
+	}
+
+	resp, err := getMetadataDeltaInternal()
+	if err != nil {
+		prometheus.CsiControlOpsHistVec.WithLabelValues(volumeType, "GetMetadataDelta",
+			prometheus.PrometheusFailStatus, "NotComputed").Observe(time.Since(start).Seconds())
+	} else {
+		prometheus.CsiControlOpsHistVec.WithLabelValues(volumeType, "GetMetadataDelta",
+			prometheus.PrometheusPassStatus, "").Observe(time.Since(start).Seconds())
+	}
+
+	return resp, err
+}
+
 // ControllerExpandVolume expands a volume.
 func (c *controller) ControllerExpandVolume(ctx context.Context, req *csi.ControllerExpandVolumeRequest) (
 	*csi.ControllerExpandVolumeResponse, error) {
@@ -2843,4 +3060,78 @@ func (c *controller) UpdateCNSVolumeInfo(ctx context.Context, patch map[string]i
 				" Error: %+v", err)
 	}
 	return nil
+}
+
+// validateGetMetadataAllocatedRequest validates the GetMetadataAllocated request
+func validateGetMetadataAllocatedRequest(ctx context.Context, req *csi.GetMetadataAllocatedRequest) error {
+	log := logger.GetLogger(ctx)
+
+	if req == nil {
+		return fmt.Errorf("GetMetadataAllocated request is nil")
+	}
+
+	if req.GetSnapshotId() == "" {
+		return fmt.Errorf("snapshot ID is required")
+	}
+
+	// Validate that snapshot ID is a valid CSI snapshot ID
+	if _, _, err := common.ParseCSISnapshotID(req.GetSnapshotId()); err != nil {
+		return fmt.Errorf("invalid snapshot ID format: %v", err)
+	}
+
+	log.Debugf("GetMetadataAllocated request validation passed")
+	return nil
+}
+
+// validateGetMetadataDeltaRequest validates the GetMetadataDelta request
+func validateGetMetadataDeltaRequest(ctx context.Context, req *csi.GetMetadataDeltaRequest) error {
+	log := logger.GetLogger(ctx)
+
+	if req == nil {
+		return fmt.Errorf("GetMetadataDelta request is nil")
+	}
+
+	if req.GetBaseSnapshotId() == "" {
+		return fmt.Errorf("base snapshot ID is required")
+	}
+
+	if req.GetTargetSnapshotId() == "" {
+		return fmt.Errorf("target snapshot ID is required")
+	}
+
+	// Validate that both snapshot IDs are valid CSI snapshot IDs
+	if _, _, err := common.ParseCSISnapshotID(req.GetBaseSnapshotId()); err != nil {
+		return fmt.Errorf("invalid base snapshot ID format: %v", err)
+	}
+
+	if _, _, err := common.ParseCSISnapshotID(req.GetTargetSnapshotId()); err != nil {
+		return fmt.Errorf("invalid target snapshot ID format: %v", err)
+	}
+
+	log.Debugf("GetMetadataDelta request validation passed")
+	return nil
+}
+
+// ChangedArea represents a changed area returned by virtual-disks
+type ChangedArea struct {
+	Offset uint64
+	Length uint64
+}
+
+// ChangedAreasResult represents the result from virtual-disks QueryChangedAreas
+type ChangedAreasResult struct {
+	ChangedAreas []ChangedArea
+	NextOffset   uint64
+}
+
+// AllocatedArea represents an allocated area returned by virtual-disks
+type AllocatedArea struct {
+	Offset uint64
+	Length uint64
+}
+
+// AllocatedAreasResult represents the result from virtual-disks QueryAllocatedBlocks
+type AllocatedAreasResult struct {
+	AllocatedAreas []AllocatedArea
+	NextOffset     uint64
 }

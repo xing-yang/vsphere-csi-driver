@@ -26,6 +26,7 @@ require (
 	github.com/vmware-tanzu/vm-operator/api v1.9.1-0.20250923172217-bf5a74e51c65
 	github.com/vmware-tanzu/vm-operator/external/byok v0.0.0-20250509154507-b93e51fc90fa
 	github.com/vmware/govmomi v0.53.0-alpha.0.0.20251008032440-5ef2d64275e2
+	github.com/vmware/virtual-disks v0.0.4
 	go.uber.org/zap v1.27.0
 	golang.org/x/crypto v0.40.0
 	golang.org/x/sync v0.16.0
@@ -233,4 +234,5 @@ replace (
 	k8s.io/sample-cli-plugin => k8s.io/sample-cli-plugin v0.34.0
 	k8s.io/sample-controller => k8s.io/sample-controller v0.34.0
 	sigs.k8s.io/controller-runtime => sigs.k8s.io/controller-runtime v0.19.1
+	github.com/vmware/virtual-disks => ../../vmware/virtual-disks
 )

@@ -405,6 +405,9 @@ const (
 	// BlockVolumeSnapshot is the feature to support CSI Snapshots for block
 	// volume on vSphere CSI driver.
 	BlockVolumeSnapshot = "block-volume-snapshot"
+	// ChangedBlockTracking is the feature to support CSI GetMetadataDelta RPC
+	// for efficient backup using changed block tracking.
+	ChangedBlockTracking = "changed-block-tracking"
 	// CSIWindowsSupport is the feature to support csi block volumes for windows
 	// node.
 	CSIWindowsSupport = "csi-windows-support"

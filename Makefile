@@ -49,10 +49,52 @@ endif
 ################################################################################
 ##                                DEPENDENCIES                                ##
 ################################################################################
+# The Virtual Disk Development Kit (VDDK) is required for Changed Block Tracking.
+# Please refer to https://github.com/vmware/virtual-disks#dependency for the dependency.
+# To compile and test with VDDK, download the VDDK tarball to .libs/ directory
+# (create the directory if it doesn't exist) and extract it.
+# NOTE: VDDK is Linux-only, so it will only be used when building for Linux
+LIB_DIR := .libs
+VDDK_LIBS := $(LIB_DIR)/vmware-vix-disklib-distrib/lib64
+
+# Check if VDDK is available (optional for most builds)
+# Only consider VDDK available if:
+# 1. The library directory exists AND
+# 2. We're building for Linux (VDDK only supports Linux) AND
+# 3. We're running on Linux (to avoid cross-compilation issues with CGO)
+VDDK_DIR_EXISTS := $(shell test -d $(VDDK_LIBS) && echo "yes" || echo "no")
+BUILD_OS := $(shell uname -s | tr '[:upper:]' '[:lower:]')
+ifeq ($(GOOS),linux)
+ifeq ($(BUILD_OS),linux)
+ifeq ($(VDDK_DIR_EXISTS),yes)
+VDDK_AVAILABLE := yes
+else
+VDDK_AVAILABLE := no
+endif
+else
+VDDK_AVAILABLE := no
+endif
+else
+VDDK_AVAILABLE := no
+endif
+
 # Verify the dependencies are in place.
 .PHONY: deps
 deps:
 	go mod download && go mod verify
+
+# Check VDDK dependency for CBT tests
+.PHONY: check-vddk
+check-vddk:
+ifeq ($(VDDK_AVAILABLE),no)
+	@echo "WARNING: VDDK not found at $(VDDK_LIBS)"
+	@echo "To run Changed Block Tracking tests, please:"
+	@echo "  1. Download VDDK from https://developer.vmware.com/web/sdk/8.0/vddk"
+	@echo "  2. Extract to $(LIB_DIR)/vmware-vix-disklib-distrib/"
+	@echo "  3. Ensure $(VDDK_LIBS) contains the library files"
+else
+	@echo "✓ VDDK found at $(VDDK_LIBS)"
+endif
 
 ################################################################################
 ##                                VERSIONS                                    ##
@@ -93,6 +135,17 @@ LDFLAGS := $(shell cat hack/make/ldflags.txt)
 LDFLAGS_CSI := $(LDFLAGS) -X "$(MOD_NAME)/pkg/csi/service.Version=$(VERSION)"
 LDFLAGS_SYNCER := $(LDFLAGS) -X "$(MOD_NAME)/pkg/syncer.Version=$(VERSION)"
 
+# Set CGO flags for building with VDDK support
+ifeq ($(VDDK_AVAILABLE),yes)
+BUILD_CGO_ENABLED := 1
+BUILD_CGO_CFLAGS := -I$(abspath $(LIB_DIR)/vmware-vix-disklib-distrib)/include
+BUILD_CGO_LDFLAGS := -L$(abspath $(VDDK_LIBS)) -lvixDiskLib -ldl -Wl,-rpath,$(abspath $(VDDK_LIBS))
+else
+BUILD_CGO_ENABLED := 0
+BUILD_CGO_CFLAGS :=
+BUILD_CGO_LDFLAGS :=
+endif
+
 # The CSI binary.
 CSI_BIN_NAME := vsphere-csi
 CSI_BIN := $(BIN_OUT)/$(CSI_BIN_NAME).$(GOOS)_$(GOARCH)
@@ -106,12 +159,203 @@ CSI_BIN_SRCS += $(addsuffix /*.go,$(shell go list -f '{{ join .Deps "\n" }}' ./c
 export CSI_BIN_SRCS
 endif
 $(CSI_BIN): $(CSI_BIN_SRCS)
-	CGO_ENABLED=0 GOOS=$(GOOS) GOARCH=$(GOARCH) go build -ldflags '$(LDFLAGS_CSI)' -o $(CSI_BIN_LINUX) $<
+	CGO_ENABLED=$(BUILD_CGO_ENABLED) CGO_CFLAGS="$(BUILD_CGO_CFLAGS)" CGO_LDFLAGS="$(BUILD_CGO_LDFLAGS)" GOOS=$(GOOS) GOARCH=$(GOARCH) go build -ldflags '$(LDFLAGS_CSI)' -o $(CSI_BIN_LINUX) $<
 	@touch $@
 
 $(CSI_BIN_WINDOWS): $(CSI_BIN_SRCS)
 	CGO_ENABLED=0 GOOS=windows GOARCH=$(GOARCH) go build -ldflags '$(LDFLAGS_CSI)' -o $(CSI_BIN_WINDOWS) $<
 	@touch $@
+
+################################################################################
+##                          DOCKER-BASED BUILD (with VDDK)                    ##
+################################################################################
+# Docker-based build for creating Linux binaries with VDDK support on any platform
+# This runs the build inside a Linux container, enabling VDDK even on macOS
+
+DOCKER_GO_VERSION ?= 1.24.2
+DOCKER_IMAGE := golang:$(DOCKER_GO_VERSION)
+
+# Check if VDDK libraries are available for Docker mount
+VDDK_FOR_DOCKER := $(shell test -d $(VDDK_LIBS) && echo "yes" || echo "no")
+
+.PHONY: docker-build-csi
+docker-build-csi:
+ifeq ($(VDDK_FOR_DOCKER),no)
+	@echo "ERROR: VDDK libraries not found at $(VDDK_LIBS)"
+	@echo "Please install VDDK before running docker-build-csi:"
+	@echo "  1. Download VDDK from https://developer.vmware.com/web/sdk/8.0/vddk"
+	@echo "  2. Extract to $(LIB_DIR)/vmware-vix-disklib-distrib/"
+	@echo ""
+	@echo "To build without VDDK support, use: make build-csi"
+	@exit 1
+endif
+	@echo "Building vsphere-csi with VDDK support in Docker container..."
+	@echo "  Docker Image: $(DOCKER_IMAGE)"
+	@echo "  VDDK Path: $(abspath $(LIB_DIR)/vmware-vix-disklib-distrib)"
+	@echo "  Target: linux/$(GOARCH)"
+	@if [ -d "$(abspath $(PWD)/../../vmware/virtual-disks)" ]; then \
+		echo "  virtual-disks: $(abspath $(PWD)/../../vmware/virtual-disks) (local)"; \
+	else \
+		echo "  ERROR: Local virtual-disks directory not found at $(abspath $(PWD)/../../vmware/virtual-disks)"; \
+		exit 1; \
+	fi
+	docker run \
+		--platform linux/$(GOARCH) \
+		--rm \
+		-e CGO_ENABLED=1 \
+		-e GOEXPERIMENT=$(GOEXPERIMENT) \
+		-e GOOS=linux \
+		-e GOARCH=$(GOARCH) \
+		-e GO111MODULE=on \
+		-e GOFLAGS=-mod=readonly \
+		-v $(abspath $(LIB_DIR)/vmware-vix-disklib-distrib):/usr/local/vmware-vix-disklib-distrib:ro \
+		-v $(abspath $(PWD)/../..):/go/src/github.com:delegated \
+		-v $(PWD)/.go/pkg:/go/pkg:delegated \
+		-v $(PWD)/.go/cache:/root/.cache/go-build:delegated \
+		-w /go/src/github.com/kubernetes-sigs/vsphere-csi-driver \
+		$(DOCKER_IMAGE) \
+		/bin/sh -c '\
+			export CGO_CFLAGS="-I/usr/local/vmware-vix-disklib-distrib/include" && \
+			export CGO_LDFLAGS="-L/usr/local/vmware-vix-disklib-distrib/lib64 -lvixDiskLib -ldl -Wl,-rpath,/usr/local/vmware-vix-disklib-distrib/lib64" && \
+			go build -ldflags "-w -s -X \"sigs.k8s.io/vsphere-csi-driver/v3/pkg/csi/service.Version=v2.1.0-rc.1-2446-g86a0b120-dirty\"" -o $(BIN_OUT)/$(CSI_BIN_NAME).linux_$(GOARCH) cmd/$(CSI_BIN_NAME)/main.go'
+	@echo "✓ Build complete: $(BIN_OUT)/$(CSI_BIN_NAME).linux_$(GOARCH)"
+	@echo "✓ This binary has VDDK support and can be used for real CBT testing on Linux"
+
+.PHONY: docker-build-syncer
+docker-build-syncer:
+	@echo "Building syncer in Docker container..."
+	docker run \
+		--platform linux/$(GOARCH) \
+		--rm \
+		-e CGO_ENABLED=0 \
+		-e GOEXPERIMENT=$(GOEXPERIMENT) \
+		-e GOOS=linux \
+		-e GOARCH=$(GOARCH) \
+		-e GO111MODULE=on \
+		-e GOFLAGS=-mod=readonly \
+		-v $(PWD):/workspace:delegated \
+		-v $(PWD)/.go/pkg:/go/pkg:delegated \
+		-v $(PWD)/.go/cache:/root/.cache/go-build:delegated \
+		-w /workspace \
+		$(DOCKER_IMAGE) \
+		go build -ldflags "$(LDFLAGS_SYNCER)" -o $(BIN_OUT)/$(SYNCER_BIN_NAME).linux_$(GOARCH) cmd/$(SYNCER_BIN_NAME)/main.go
+	@echo "✓ Build complete: $(BIN_OUT)/$(SYNCER_BIN_NAME).linux_$(GOARCH)"
+
+.PHONY: docker-build-all
+docker-build-all: docker-build-csi docker-build-syncer
+	@echo "✓ All Docker builds complete"
+
+# Verify the VDDK binary has CGO enabled
+.PHONY: verify-vddk-binary
+verify-vddk-binary:
+	@echo "Verifying VDDK support in binary..."
+	@if [ ! -f "$(BIN_OUT)/$(CSI_BIN_NAME).linux_$(GOARCH)" ]; then \
+		echo "ERROR: Binary not found. Run 'make docker-build-csi' first."; \
+		exit 1; \
+	fi
+	@echo "Binary info:"
+	@file $(BIN_OUT)/$(CSI_BIN_NAME).linux_$(GOARCH)
+	@echo ""
+	@echo "Build info:"
+	@go version -m $(BIN_OUT)/$(CSI_BIN_NAME).linux_$(GOARCH) | grep -E "(CGO_ENABLED|GOARCH|GOOS)" || echo "  (build info not available)"
+	@echo ""
+	@if ldd $(BIN_OUT)/$(CSI_BIN_NAME).linux_$(GOARCH) 2>/dev/null | grep -q "libvixDiskLib"; then \
+		echo "✓ Binary is dynamically linked with VDDK"; \
+		ldd $(BIN_OUT)/$(CSI_BIN_NAME).linux_$(GOARCH) 2>/dev/null | grep vix || true; \
+	else \
+		echo "⚠ Binary appears to be statically linked or VDDK not detected"; \
+		echo "  This is expected on non-Linux systems"; \
+	fi
+
+################################################################################
+##                     DOCKER CONTAINER IMAGE BUILDS                          ##
+################################################################################
+# Docker image registry and tags
+IMAGE_REGISTRY ?= localhost:5000
+IMAGE_TAG ?= latest
+CSI_IMAGE_NAME ?= vsphere-csi-driver
+SYNCER_IMAGE_NAME ?= vsphere-syncer
+
+# Version information
+GIT_COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
+BUILD_VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
+
+# Build container images with VDDK support
+.PHONY: docker-image-csi-vddk
+docker-image-csi-vddk:
+ifeq ($(VDDK_FOR_DOCKER),no)
+	@echo "ERROR: VDDK libraries not found at $(VDDK_LIBS)"
+	@echo "Please install VDDK before building container images with VDDK support"
+	@exit 1
+endif
+	@echo "Building CSI driver container image with VDDK support..."
+	@echo "  Image: $(IMAGE_REGISTRY)/$(CSI_IMAGE_NAME):$(IMAGE_TAG)"
+	@echo "  Version: $(BUILD_VERSION)"
+	@echo "  Git Commit: $(GIT_COMMIT)"
+	@echo "  Build context: $(abspath $(PWD)/../..)"
+	docker build \
+		--platform linux/$(GOARCH) \
+		-f $(PWD)/images/driver/Dockerfile.vddk \
+		-t $(IMAGE_REGISTRY)/$(CSI_IMAGE_NAME):$(IMAGE_TAG) \
+		-t $(IMAGE_REGISTRY)/$(CSI_IMAGE_NAME):$(BUILD_VERSION) \
+		--build-arg VERSION=$(BUILD_VERSION) \
+		--build-arg GIT_COMMIT=$(GIT_COMMIT) \
+		--build-arg GOLANG_IMAGE=golang:1.24.2 \
+		$(abspath $(PWD)/../..)
+	@echo "✓ Container image built: $(IMAGE_REGISTRY)/$(CSI_IMAGE_NAME):$(IMAGE_TAG)"
+	@echo "✓ This image includes VDDK libraries and has full CBT support"
+
+# Build standard CSI driver container image (without VDDK)
+.PHONY: docker-image-csi
+docker-image-csi:
+	@echo "Building CSI driver container image (without VDDK)..."
+	@echo "  Image: $(IMAGE_REGISTRY)/$(CSI_IMAGE_NAME):$(IMAGE_TAG)"
+	docker build \
+		--platform linux/$(GOARCH) \
+		-f images/driver/Dockerfile \
+		-t $(IMAGE_REGISTRY)/$(CSI_IMAGE_NAME):$(IMAGE_TAG) \
+		--build-arg VERSION=$(BUILD_VERSION) \
+		--build-arg GIT_COMMIT=$(GIT_COMMIT) \
+		.
+	@echo "✓ Container image built: $(IMAGE_REGISTRY)/$(CSI_IMAGE_NAME):$(IMAGE_TAG)"
+
+# Build syncer container image
+.PHONY: docker-image-syncer
+docker-image-syncer:
+	@echo "Building syncer container image..."
+	@echo "  Image: $(IMAGE_REGISTRY)/$(SYNCER_IMAGE_NAME):$(IMAGE_TAG)"
+	docker build \
+		--platform linux/$(GOARCH) \
+		-f images/syncer/Dockerfile \
+		-t $(IMAGE_REGISTRY)/$(SYNCER_IMAGE_NAME):$(IMAGE_TAG) \
+		--build-arg VERSION=$(BUILD_VERSION) \
+		--build-arg GIT_COMMIT=$(GIT_COMMIT) \
+		.
+	@echo "✓ Container image built: $(IMAGE_REGISTRY)/$(SYNCER_IMAGE_NAME):$(IMAGE_TAG)"
+
+# Build all container images with VDDK support
+.PHONY: docker-images-vddk
+docker-images-vddk: docker-image-csi-vddk docker-image-syncer
+	@echo "✓ All container images with VDDK built successfully"
+
+# Build all container images (without VDDK)
+.PHONY: docker-images
+docker-images: docker-image-csi docker-image-syncer
+	@echo "✓ All container images built successfully"
+
+# Push container images to registry
+.PHONY: docker-push
+docker-push:
+	@echo "Pushing images to $(IMAGE_REGISTRY)..."
+	docker push $(IMAGE_REGISTRY)/$(CSI_IMAGE_NAME):$(IMAGE_TAG)
+	docker push $(IMAGE_REGISTRY)/$(SYNCER_IMAGE_NAME):$(IMAGE_TAG)
+	@echo "✓ Images pushed successfully"
+
+# List built images
+.PHONY: docker-images-list
+docker-images-list:
+	@echo "Built images:"
+	@docker images | grep -E "($(CSI_IMAGE_NAME)|$(SYNCER_IMAGE_NAME))" || echo "No images found"
 
 
 # The Syncer binary.
@@ -214,6 +458,11 @@ clean:
 clean-d:
 	@find . -name "*.d" -type f -delete
 
+.PHONY: clean-vddk
+clean-vddk:
+	@echo "Cleaning VDDK libraries..."
+	rm -rf $(LIB_DIR)
+
 ################################################################################
 ##                                CROSS BUILD                                 ##
 ################################################################################
@@ -279,8 +528,21 @@ ifndef PKGS_WITH_TESTS
 export PKGS_WITH_TESTS := $(sort $(shell find . -path ./tests -prune -o -name "*_test.go" -type f -exec dirname \{\} \;))
 endif
 TEST_FLAGS ?= -v -count=1
+
+# Set up CGO flags for VDDK if available
+ifeq ($(VDDK_AVAILABLE),yes)
+export CGO_ENABLED := 1
+export CGO_CFLAGS := -I$(abspath $(LIB_DIR)/vmware-vix-disklib-distrib)/include
+export CGO_LDFLAGS := -L$(abspath $(VDDK_LIBS)) -lvixDiskLib -ldl -Wl,-rpath,$(abspath $(VDDK_LIBS))
+VDDK_TEST_INFO := (with VDDK support)
+else
+export CGO_ENABLED := 0
+VDDK_TEST_INFO := (without VDDK - CBT tests will be skipped)
+endif
+
 .PHONY: unit build-unit-tests
 unit unit-test:
+	@echo "Running unit tests $(VDDK_TEST_INFO)..."
 	env -u VSPHERE_SERVER -u VSPHERE_DATACENTER -u VSPHERE_PASSWORD -u VSPHERE_USER -u VSPHERE_STORAGE_POLICY_NAME -u KUBECONFIG -u WCP_ENDPOINT -u WCP_PORT -u WCP_NAMESPACE -u TOKEN -u CERTIFICATE go test $(TEST_FLAGS) $(PKGS_WITH_TESTS)
 unit-cover:
 	env -u VSPHERE_SERVER -u VSPHERE_DATACENTER -u VSPHERE_PASSWORD -u VSPHERE_USER -u VSPHERE_STORAGE_POLICY_NAME -u KUBECONFIG -u WCP_ENDPOINT -u WCP_PORT -u WCP_NAMESPACE -u TOKEN -u CERTIFICATE go test $(TEST_FLAGS) $(PKGS_WITH_TESTS) && go tool cover -html=cover.out
@@ -363,6 +625,16 @@ coverprofile: test-cover
 .PHONY: test-e2e
 test-e2e:
 	hack/run-e2e-test.sh
+
+# Test Changed Block Tracking (requires VDDK)
+.PHONY: test-cbt
+test-cbt: check-vddk
+ifeq ($(VDDK_AVAILABLE),yes)
+	@echo "Running Changed Block Tracking tests with VDDK..."
+	CGO_ENABLED=1 go test $(TEST_FLAGS) -run TestWCPGetMetadata ./pkg/csi/service/wcp
+else
+	$(error VDDK is required for CBT tests. Please install VDDK to $(LIB_DIR)/vmware-vix-disklib-distrib/)
+endif
 ################################################################################
 ##                                 LINTING                                    ##
 ################################################################################

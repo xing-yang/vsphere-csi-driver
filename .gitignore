@@ -45,3 +45,6 @@ junit_check.xml
 /vsphere-csi
 /vsphere-csi.linux_amd64
 
+# VDDK libraries for Changed Block Tracking
+/.libs/
+

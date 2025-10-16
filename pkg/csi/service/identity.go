@@ -66,6 +66,13 @@ func (driver *vsphereCSIDriver) GetPluginCapabilities(
 					},
 				},
 			},
+			{
+				Type: &csi.PluginCapability_Service_{
+					Service: &csi.PluginCapability_Service{
+						Type: csi.PluginCapability_Service_SNAPSHOT_METADATA_SERVICE,
+					},
+				},
+			},
 		},
 	}
 	return rep, nil
