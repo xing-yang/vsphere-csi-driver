@@ -1,0 +1,212 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.19.0
+  name: storageclassproperties.cns.vmware.com
+spec:
+  group: cns.vmware.com
+  names:
+    kind: StorageClassProperties
+    listKind: StorageClassPropertiesList
+    plural: storageclassproperties
+    singular: storageclassproperties
+  scope: Cluster
+  versions:
+  - name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: StorageClassProperties is the Schema for the storageclassproperties
+          API
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: StorageClassPropertiesSpec defines the desired state of StorageClassProperties
+            properties:
+              kind:
+                description: |-
+                  Kind specifies whether this is for a StorageClass or VolumeAttributesClass
+                  Valid values: "StorageClass", "VolumeAttributesClass"
+                enum:
+                - StorageClass
+                - VolumeAttributesClass
+                type: string
+              storageClassName:
+                description: |-
+                  StorageClassName is the name of the StorageClass or VolumeAttributesClass
+                  this properties object describes
+                type: string
+              storagePolicyID:
+                description: StoragePolicyID is the vSphere storage policy ID
+                type: string
+            required:
+            - kind
+            - storageClassName
+            - storagePolicyID
+            type: object
+          status:
+            description: StorageClassPropertiesStatus defines the observed state of
+              StorageClassProperties
+            properties:
+              encryptionInfo:
+                description: EncryptionInfo describes encryption capabilities
+                properties:
+                  cryptoKeyId:
+                    description: CryptoKeyId is the identifier for the encryption
+                      key (if applicable)
+                    type: string
+                  encryptionType:
+                    description: |-
+                      EncryptionType indicates the type of encryption
+                      Valid values: "vm-crypt", "storage-level", "none"
+                    enum:
+                    - vm-crypt
+                    - storage-level
+                    - none
+                    type: string
+                  keyProviderId:
+                    description: KeyProviderId is the identifier for the key provider
+                      (if applicable)
+                    type: string
+                  supported:
+                    description: Supported indicates whether encryption is supported
+                    type: boolean
+                required:
+                - supported
+                type: object
+              performanceInfo:
+                description: PerformanceInfo describes performance characteristics
+                properties:
+                  diskStripes:
+                    description: DiskStripes is the number of disk stripes
+                    format: int32
+                    type: integer
+                  iopsLimit:
+                    description: IopsLimit is the IOPS limit for volumes created from
+                      this storage class
+                    format: int64
+                    type: integer
+                  raidType:
+                    description: RaidType indicates the RAID configuration
+                    type: string
+                  storageTier:
+                    description: |-
+                      StorageTier indicates the storage tier
+                      Valid values: "all-flash", "hybrid"
+                    enum:
+                    - all-flash
+                    - hybrid
+                    type: string
+                type: object
+              storageTypeInfo:
+                description: StorageTypeInfo describes the underlying storage type
+                properties:
+                  datastoreType:
+                    description: |-
+                      DatastoreType indicates the type of datastore
+                      Valid values: "vsan", "vmfs", "nfs", "vvol"
+                    enum:
+                    - vsan
+                    - vmfs
+                    - nfs
+                    - vvol
+                    type: string
+                  nfsVersion:
+                    description: NfsVersion is the NFS version (only for nfs datastoreType)
+                    type: string
+                  vmfsVersion:
+                    description: VmfsVersion is the VMFS version (only for vmfs datastoreType)
+                    type: string
+                  vsanArchitecture:
+                    description: |-
+                      VsanArchitecture indicates the vSAN architecture (only for vsan datastoreType)
+                      Valid values: "esa", "osa"
+                    enum:
+                    - esa
+                    - osa
+                    type: string
+                  vsanVersion:
+                    description: VsanVersion is the vSAN version (only for vsan datastoreType)
+                    type: string
+                required:
+                - datastoreType
+                type: object
+              topologyInfo:
+                description: TopologyInfo describes the topology characteristics of
+                  the storage
+                properties:
+                  accessibleZones:
+                    description: AccessibleZones lists the zones where this storage
+                      class can be accessed
+                    items:
+                      type: string
+                    type: array
+                  backingZones:
+                    description: BackingZones lists the zones where the physical storage
+                      resides
+                    items:
+                      type: string
+                    type: array
+                  type:
+                    description: |-
+                      Type indicates whether the storage is zonal or cross-zonal
+                      Valid values: "zonal", "cross-zonal"
+                    enum:
+                    - zonal
+                    - cross-zonal
+                    type: string
+                required:
+                - type
+                type: object
+              volumeTypeInfo:
+                description: VolumeTypeInfo describes supported volume types and access
+                  modes
+                properties:
+                  blockSupport:
+                    description: BlockSupport indicates whether raw block volumes
+                      are supported
+                    type: boolean
+                  fileSystemTypes:
+                    description: FileSystemTypes lists supported file system types
+                      for filesystem volumes
+                    items:
+                      type: string
+                    type: array
+                  supportedAccessModes:
+                    description: |-
+                      SupportedAccessModes lists the access modes supported by this storage class
+                      Valid values: "ReadWriteOnce", "ReadWriteMany", "ReadOnlyMany"
+                    items:
+                      type: string
+                    type: array
+                  supportedVolumeModes:
+                    description: |-
+                      SupportedVolumeModes lists the volume modes supported
+                      Valid values: "Filesystem", "Block"
+                    items:
+                      type: string
+                    type: array
+                type: object
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

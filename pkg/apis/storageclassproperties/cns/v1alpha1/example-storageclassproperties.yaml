@@ -1,0 +1,212 @@
+# Example StorageClassProperties CR showing all available properties
+apiVersion: cns.vmware.com/v1alpha1
+kind: StorageClassProperties
+metadata:
+  name: premium-vsan-esa-sc
+spec:
+  kind: StorageClass
+  storageClassName: premium-vsan-esa-sc
+  storagePolicyID: "aa6d5a82-1c88-45da-85d3-3d74b91a5bad"
+status:
+  # Storage Type Information
+  storageTypeInfo:
+    datastoreType: vsan
+    vsanArchitecture: ESA
+    vsanVersion: "9.1"
+
+  # Volume Type Information
+  volumeTypeInfo:
+    supportedAccessModes:
+      - ReadWriteOnce
+      - ReadWriteMany
+      - ReadOnlyMany
+    supportedVolumeModes:
+      - filesystem
+      - block
+    fileSystemTypes:
+      - ext4
+      - xfs
+      - ntfs
+    blockSupport: true
+
+  # Topology Information
+  topologyInfo:
+    topologyType: crosszonal
+    accessibleZones:
+      - zone-1
+      - zone-2
+      - zone-3
+    backingZones:
+      - zone-1
+      - zone-2
+      - zone-3
+
+  # Encryption Information
+  encryptionInfo:
+    supported: true
+    types:
+      - vm-crypt
+      - vsan-encryption
+    requiresKeyProvider: true
+
+  # Performance Information
+  performanceInfo:
+    iopsLimit: 10000
+    diskStripes: 1
+    raidType: "RAID-5"
+    storageTier: all-flash
+
+---
+# Example 2: Basic VMFS Storage Class with Limited Features
+apiVersion: cns.vmware.com/v1alpha1
+kind: StorageClassProperties
+metadata:
+  name: standard-vmfs-sc
+spec:
+  kind: StorageClass
+  storageClassName: standard-vmfs-sc
+  storagePolicyID: "bb7e6b93-2d99-56eb-96e4-4e85c92b6cbe"
+status:
+  # Storage Type Information
+  storageTypeInfo:
+    datastoreType: vmfs
+    vmfsVersion: "6"
+
+  # Volume Type Information
+  volumeTypeInfo:
+    supportedAccessModes:
+      - ReadWriteOnce
+    supportedVolumeModes:
+      - filesystem
+      - block
+    fileSystemTypes:
+      - ext4
+      - xfs
+      - ntfs
+    blockSupport: true
+
+  # Topology Information
+  topologyInfo:
+    topologyType: zonal
+    accessibleZones:
+      - zone-1
+    backingZones:
+      - zone-1
+
+  # Encryption Information
+  encryptionInfo:
+    supported: true
+    types:
+      - vm-crypt
+    requiresKeyProvider: true
+
+---
+# Example 3: vSAN File Services (RWX Support)
+apiVersion: cns.vmware.com/v1alpha1
+kind: StorageClassProperties
+metadata:
+  name: vsan-file-services-sc
+spec:
+  kind: StorageClass
+  storageClassName: vsan-file-services-sc
+  storagePolicyID: "cc8e7c94-3e00-67fc-97f5-5f96d93c7def"
+status:
+  # Storage Type Information
+  storageTypeInfo:
+    datastoreType: vsan
+    vsanArchitecture: ESA
+    vsanVersion: "9.1"
+
+  # Volume Type Information - Multi-node access only
+  volumeTypeInfo:
+    supportedAccessModes:
+      - ReadWriteMany      # MULTI_NODE_MULTI_WRITER
+      - ReadOnlyMany       # MULTI_NODE_READER_ONLY
+      # Note: ReadWriteOnce (SINGLE_NODE_WRITER) is NOT supported for file volumes
+    supportedVolumeModes:
+      - filesystem         # File volumes only, no block support
+    fileSystemTypes:
+      - nfs4               # vSAN File Services uses NFS protocol
+      - nfs
+    blockSupport: false    # vSAN File Services does not support block volumes
+
+  # Topology Information
+  topologyInfo:
+    topologyType: zonal
+    accessibleZones:
+      - zone-1
+    backingZones:
+      - zone-1
+    # Note: vSAN File Services does NOT support stretched/cross-zonal clusters
+    # unless Workload Domain Isolation feature is enabled
+
+  # Encryption Information
+  encryptionInfo:
+    supported: true
+    types:
+      - vsan-encryption
+    requiresKeyProvider: true
+
+  # Performance Information
+  # Note: vSAN File Services does NOT support performance tuning via SPBM policies.
+  # File shares use the underlying vSAN datastore's configuration.
+  # IOPS limits, disk stripes, and RAID type are NOT configurable for file volumes.
+
+---
+# Example 4: VolumeAttributesClass for Performance Tier (Gold)
+apiVersion: cns.vmware.com/v1alpha1
+kind: StorageClassProperties
+metadata:
+  name: gold-performance-vac
+spec:
+  kind: VolumeAttributesClass
+  storageClassName: gold-performance
+  storagePolicyID: "aa6d5a82-1c88-45da-85d3-3d74b91a5bad"
+status:
+  # Storage Type Information
+  storageTypeInfo:
+    datastoreType: vsan
+    vsanArchitecture: ESA
+    vsanVersion: "9.1"
+
+  # Volume Type Information
+  volumeTypeInfo:
+    supportedAccessModes:
+      - ReadWriteOnce
+      - ReadWriteMany
+      - ReadOnlyMany
+    supportedVolumeModes:
+      - filesystem
+      - block
+    fileSystemTypes:
+      - ext4
+      - xfs
+      - ntfs
+    blockSupport: true
+
+  # Topology Information
+  topologyInfo:
+    topologyType: crosszonal
+    accessibleZones:
+      - zone-1
+      - zone-2
+      - zone-3
+    backingZones:
+      - zone-1
+      - zone-2
+      - zone-3
+
+  # Encryption Information
+  encryptionInfo:
+    supported: true
+    types:
+      - vm-crypt
+      - vsan-encryption
+    requiresKeyProvider: true
+
+  # Performance Information
+  performanceInfo:
+    iopsLimit: 10000
+    diskStripes: 1
+    raidType: "RAID-1"
+    storageTier: all-flash
