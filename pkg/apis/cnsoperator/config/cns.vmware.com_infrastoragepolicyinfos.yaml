@@ -71,6 +71,12 @@ spec:
             description: InfraStoragePolicyInfoStatus defines the observed state of
               InfraStoragePolicyInfo.
             properties:
+              capacityObservedTime:
+                description: |-
+                  CapacityObservedTime is the time at which the values in ZoneCapacity were last read from
+                  vCenter. Free space changes continuously, so consumers should treat it as approximate.
+                format: date-time
+                type: string
               error:
                 description: Error describes a failure condition when observing or
                   reconciling this resource.
@@ -141,6 +147,46 @@ spec:
                 - zonesSupportingHighPerformanceLinkedClone
                 - zonesSupportingLinkedClone
                 type: object
+              zoneCapacity:
+                description: |-
+                  ZoneCapacity reports, per accessible zone, the aggregate capacity and free space of the
+                  datastores compatible with the policy. It is omitted when capacity has not been observed.
+                items:
+                  description: |-
+                    ZoneCapacity describes the aggregate capacity of the datastores that are compatible with the
+                    storage policy and accessible from a zone.
+                  properties:
+                    capacity:
+                      anyOf:
+                      - type: integer
+                      - type: string
+                      description: |-
+                        Capacity is the total capacity of the datastores compatible with the policy in this zone.
+                        A datastore shared by several zones is counted in each of those zones.
+                      pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                      x-kubernetes-int-or-string: true
+                    freeSpace:
+                      anyOf:
+                      - type: integer
+                      - type: string
+                      description: |-
+                        FreeSpace is the total free space of the datastores compatible with the policy in this zone.
+                        It is a point-in-time observation and may be stale; see InfraStoragePolicyInfoStatus.CapacityObservedTime.
+                      pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                      x-kubernetes-int-or-string: true
+                    zone:
+                      description: Zone is the name of the zone.
+                      minLength: 1
+                      type: string
+                  required:
+                  - capacity
+                  - freeSpace
+                  - zone
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - zone
+                x-kubernetes-list-type: map
             type: object
         type: object
     served: true

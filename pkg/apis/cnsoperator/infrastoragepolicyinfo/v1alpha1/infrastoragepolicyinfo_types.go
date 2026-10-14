@@ -17,6 +17,7 @@ limitations under the License.
 package v1alpha1
 
 import (
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -45,6 +46,22 @@ type VolumeCapabilities struct {
 	// +listType=set
 	// +kubebuilder:validation:items:MinLength=1
 	ZonesSupportingHighPerformanceLinkedClone []string `json:"zonesSupportingHighPerformanceLinkedClone"`
+}
+
+// ZoneCapacity describes the aggregate capacity of the datastores that are compatible with the
+// storage policy and accessible from a zone.
+type ZoneCapacity struct {
+	// Zone is the name of the zone.
+	// +kubebuilder:validation:MinLength=1
+	Zone string `json:"zone"`
+
+	// Capacity is the total capacity of the datastores compatible with the policy in this zone.
+	// A datastore shared by several zones is counted in each of those zones.
+	Capacity resource.Quantity `json:"capacity"`
+
+	// FreeSpace is the total free space of the datastores compatible with the policy in this zone.
+	// It is a point-in-time observation and may be stale; see InfraStoragePolicyInfoStatus.CapacityObservedTime.
+	FreeSpace resource.Quantity `json:"freeSpace"`
 }
 
 // Topology describes topology accessibility for the storage policy within the cluster.
@@ -94,6 +111,18 @@ type InfraStoragePolicyInfoStatus struct {
 	// VolumeCapabilities describes the supported volume capabilities.
 	// +optional
 	VolumeCapabilities *VolumeCapabilities `json:"volumeCapabilities,omitempty"`
+
+	// ZoneCapacity reports, per accessible zone, the aggregate capacity and free space of the
+	// datastores compatible with the policy. It is omitted when capacity has not been observed.
+	// +listType=map
+	// +listMapKey=zone
+	// +optional
+	ZoneCapacity []ZoneCapacity `json:"zoneCapacity,omitempty"`
+
+	// CapacityObservedTime is the time at which the values in ZoneCapacity were last read from
+	// vCenter. Free space changes continuously, so consumers should treat it as approximate.
+	// +optional
+	CapacityObservedTime *metav1.Time `json:"capacityObservedTime,omitempty"`
 
 	// Error describes a failure condition when observing or reconciling this resource.
 	// +optional
