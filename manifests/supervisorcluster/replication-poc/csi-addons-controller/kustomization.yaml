@@ -1,0 +1,74 @@
+# csi-addons controller and CRDs for the Supervisor, pinned to the release
+# whose csi-addons spec matches go.mod.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - https://github.com/csi-addons/kubernetes-csi-addons/releases/download/v0.15.1/crds.yaml
+  - https://github.com/csi-addons/kubernetes-csi-addons/releases/download/v0.15.1/rbac.yaml
+  - https://github.com/csi-addons/kubernetes-csi-addons/releases/download/v0.15.1/setup-controller.yaml
+
+images:
+  # Push to a registry the Supervisor control plane can pull from if quay.io
+  # is not reachable.
+  - name: quay.io/csiaddons/k8s-controller
+    newTag: v0.15.1
+
+patches:
+  # Host networking needs the privileged Pod Security level; the namespace
+  # otherwise gets the cluster default (baseline).
+  - target:
+      kind: Namespace
+      name: csi-addons-system
+    patch: |-
+      - op: add
+        path: /metadata/labels/pod-security.kubernetes.io~1enforce
+        value: privileged
+  # Run on the control plane with the host network: other Supervisor nodes would
+  # run it as a vSphere Pod, and control plane VMs have no pod network (no NSX
+  # CNI). Ports 8080/8443 are taken on the VM, so move metrics and health.
+  - target:
+      kind: Deployment
+      name: csi-addons-controller-manager
+    patch: |-
+      - op: add
+        path: /spec/template/spec/nodeSelector
+        value:
+          node-role.kubernetes.io/control-plane: ""
+      - op: add
+        path: /spec/template/spec/tolerations
+        value:
+          - key: node-role.kubernetes.io/control-plane
+            operator: Exists
+            effect: NoSchedule
+      - op: add
+        path: /spec/template/spec/hostNetwork
+        value: true
+      - op: add
+        path: /spec/template/spec/dnsPolicy
+        value: ClusterFirstWithHostNet
+      - op: add
+        path: /spec/template/spec/containers/0/args/-
+        value: --health-probe-bind-address=:9071
+      - op: add
+        path: /spec/template/spec/containers/0/args/-
+        value: --metrics-bind-address=:9072
+      - op: replace
+        path: /spec/template/spec/containers/0/livenessProbe/httpGet/port
+        value: 9071
+      - op: replace
+        path: /spec/template/spec/containers/0/readinessProbe/httpGet/port
+        value: 9071
+      - op: replace
+        path: /spec/template/spec/containers/0/ports/0/containerPort
+        value: 9072
+      - op: add
+        path: /spec/template/spec/containers/0/env/-
+        value:
+          name: KUBERNETES_SERVICE_HOST
+          value: "127.0.0.1"
+      - op: add
+        path: /spec/template/spec/containers/0/env/-
+        value:
+          name: KUBERNETES_SERVICE_PORT
+          value: "6443"

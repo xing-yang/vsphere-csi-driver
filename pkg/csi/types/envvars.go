@@ -47,4 +47,31 @@ const (
 	// Depending on the value, either controller and node service will be
 	// activated (The identity service is always activated).
 	EnvVarMode = "X_CSI_MODE"
+
+	// EnvVarCSIAddonsEndpoint specifies the unix socket on which the controller
+	// serves the csi-addons Identity and Replication services.
+	EnvVarCSIAddonsEndpoint = "CSI_ADDONS_ENDPOINT"
+
+	// EnvVarReplicationBackend selects the SnapService backend for volume
+	// replication: "fake" (in-memory) or "rest".
+	EnvVarReplicationBackend = "X_CSI_REPLICATION_BACKEND"
+
+	// EnvVarReplicationSite is the SnapService site name of this Supervisor.
+	EnvVarReplicationSite = "X_CSI_REPLICATION_SITE"
+
+	// EnvVarReplicationPeerSite is the SnapService site paired with this
+	// Supervisor. Used by the fake backend.
+	EnvVarReplicationPeerSite = "X_CSI_REPLICATION_PEER_SITE"
+
+	// EnvVarReplicationEndpoint is the SnapService REST endpoint, used by the
+	// rest backend when the VolumeReplicationClass secret does not set one.
+	EnvVarReplicationEndpoint = "X_CSI_REPLICATION_ENDPOINT"
+
+	// EnvVarReplicationCluster is the vSphere cluster that owns protection
+	// groups, used by the rest backend when the secret does not set one.
+	EnvVarReplicationCluster = "X_CSI_REPLICATION_CLUSTER"
+
+	// EnvVarReplicationSkipVolumeRegistration skips registering promoted volumes
+	// with CNS. Only for testing with the fake SnapService.
+	EnvVarReplicationSkipVolumeRegistration = "X_CSI_REPLICATION_SKIP_VOLUME_REGISTRATION"
 )

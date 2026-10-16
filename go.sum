@@ -17,6 +17,8 @@ github.com/cespare/xxhash/v2 v2.3.0/go.mod h1:VGX0DQ3Q6kWi7AoAeZDth3/j3BFtOZR5XL
 github.com/container-storage-interface/spec v1.12.1-0.20260720052920-cd9e7ad1ae09 h1:wmRsAxwkfle3i2KIubElYZIuz1rgN3vtkIlf8kAS/hA=
 github.com/container-storage-interface/spec v1.12.1-0.20260720052920-cd9e7ad1ae09/go.mod h1:apAI5+IWKBXTKh293aCL8t3f2Z9qzjhwaI3ghwGoR94=
 github.com/creack/pty v1.1.9/go.mod h1:oKZEueFk5CKHvIhNR5MUki03XCEU+Q6VDXinZuGJ33E=
+github.com/csi-addons/spec v0.2.1-0.20260515055340-d4a373713b9a h1:AxvSsTN8TxwpeP6X/ScNK5i+6eXu3APRfuIXSEMENVQ=
+github.com/csi-addons/spec v0.2.1-0.20260515055340-d4a373713b9a/go.mod h1:Mwq4iLiUV4s+K1bszcWU6aMsR5KPsbIYzzszJ6+56vI=
 github.com/cyphar/filepath-securejoin v0.7.0 h1:s0Y3ITPy6sQn5xt54DuYvTF8hu134ooYLUb58DX/HjE=
 github.com/cyphar/filepath-securejoin v0.7.0/go.mod h1:ymLGms/u3BYaviIiuKFnUx8EkQEZeK6cInNoAPJA3o4=
 github.com/davecgh/go-spew v1.1.0/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=

@@ -1,0 +1,63 @@
+# Permissions for the csi-addons sidecar in the vsphere-csi-controller pod.
+kind: ClusterRole
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: vsphere-csi-addons-sidecar-role
+rules:
+  - apiGroups: ["csiaddons.openshift.io"]
+    resources: ["csiaddonsnodes"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Validates the service account token sent by the csi-addons controller.
+  - apiGroups: ["authentication.k8s.io"]
+    resources: ["tokenreviews"]
+    verbs: ["create"]
+  # Resolves the owner of the pod for the CSIAddonsNode.
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get"]
+  - apiGroups: ["apps"]
+    resources: ["replicasets", "deployments"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["persistentvolumes"]
+    verbs: ["get"]
+  # Reads the secret referenced by a VolumeReplicationClass.
+  # TODO: Restrict to the namespaces that hold replication secrets.
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+---
+kind: ClusterRoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: vsphere-csi-addons-sidecar-binding
+subjects:
+  - kind: ServiceAccount
+    name: vsphere-csi-controller
+    namespace: vmware-system-csi
+roleRef:
+  kind: ClusterRole
+  name: vsphere-csi-addons-sidecar-role
+  apiGroup: rbac.authorization.k8s.io
+---
+# Lets namespace users with the edit role manage VolumeReplications.
+kind: ClusterRole
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: volumereplication-edit
+  labels:
+    rbac.authorization.k8s.io/aggregate-to-edit: "true"
+    rbac.authorization.k8s.io/aggregate-to-admin: "true"
+rules:
+  - apiGroups: ["replication.storage.openshift.io"]
+    resources: ["volumereplications"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["replication.storage.openshift.io"]
+    resources: ["volumereplications/status"]
+    verbs: ["get"]
