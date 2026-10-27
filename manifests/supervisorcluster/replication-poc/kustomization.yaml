@@ -1,0 +1,14 @@
+# POC overlay: adds the csi-addons sidecar to the Supervisor CSI controller
+# and enables the volume-replication FSS. Render it to review the changes; on a
+# running Supervisor apply the patches to the live objects instead (volume-replication-poc-supervisor-setup.md, kept
+# outside the repository).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - ../1.35
+  - csi-addons-rbac.yaml
+
+patches:
+  - path: controller-patch.yaml
+  - path: feature-states-patch.yaml

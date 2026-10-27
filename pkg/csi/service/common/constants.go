@@ -743,6 +743,14 @@ const (
 	// Supervisor capability, only on the two-ConfigMap FSS check (see VKSRegisterVolume).
 	VSphereDPLPModernApp = "supports_vsphere_dp_lp_modern_app"
 
+	// VolumeReplication is the Supervisor FSS (csi-feature-states ConfigMap)
+	// that enables the csi-addons Replication service, backed by vSphere
+	// Replication (HMS) CNS volume groups. Promoting a volume on a site where it
+	// does not exist yet also requires VSphereDPLPModernApp to register it with
+	// its source ID.
+	// TODO: Replace with a WCP capability once HMS CNS replication ships.
+	VolumeReplication = "volume-replication"
+
 	// VKSRegisterVolume is the guest-cluster FSS that gates the VKSRegisterVolume
 	// operator. Requires the flag to be true in both the guest PVCSI ConfigMap and the
 	// Supervisor csi-feature-states ConfigMap (two-ConfigMap gating, not associated with

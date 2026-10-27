@@ -7,6 +7,7 @@ require (
 	github.com/akutz/gofsutil v0.1.2
 	github.com/cert-manager/cert-manager v1.20.3
 	github.com/container-storage-interface/spec v1.12.1-0.20260720052920-cd9e7ad1ae09
+	github.com/csi-addons/spec v0.2.1-0.20260515055340-d4a373713b9a
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc
 	github.com/evanphx/json-patch/v5 v5.9.11
 	github.com/fsnotify/fsnotify v1.10.1

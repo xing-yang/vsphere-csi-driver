@@ -1,0 +1,74 @@
+kind: Deployment
+apiVersion: apps/v1
+metadata:
+  name: vsphere-csi-controller
+  namespace: vmware-system-csi
+spec:
+  template:
+    spec:
+      containers:
+        - name: vsphere-csi-controller
+          env:
+            - name: CSI_ADDONS_ENDPOINT
+              value: unix:///csi/csi-addons.sock
+            # "fake" is an in-memory HMS with two simulated sites. Use "hms"
+            # with an HMS endpoint and SSO credentials in the
+            # VolumeReplicationClass secret (volume-replication-poc-supervisor-setup.md).
+            - name: X_CSI_REPLICATION_BACKEND
+              value: fake
+            - name: X_CSI_REPLICATION_FAKE_SITE
+              value: site-a
+            - name: X_CSI_REPLICATION_FAKE_PEER_SITE
+              value: site-b
+        - name: csi-addons
+          image: quay.io/csiaddons/k8s-sidecar
+          imagePullPolicy: IfNotPresent
+          args:
+            - "--node-id=$(NODE_ID)"
+            - "--csi-addons-address=/csi/csi-addons.sock"
+            # The pod uses the host network on control plane nodes, so the
+            # port must be free on the host. Do not set --controller-ip: the
+            # sidecar would then advertise "ip:port", which the csi-addons
+            # controller cannot parse; it only accepts pod://<pod>.<ns>:<port>.
+            - "--controller-port=9070"
+            - "--pod=$(POD_NAME)"
+            - "--namespace=$(POD_NAMESPACE)"
+            - "--pod-uid=$(POD_UID)"
+            # The csi-addons controller sends requests to the lease holder, so
+            # keep the sidecar defaults (15s/10s/5s). With 120s the new pod
+            # waited ~170s after a restart before replication worked again.
+            - "--leader-election-namespace=$(POD_NAMESPACE)"
+            # Replication RPCs wait for HMS tasks (configure, recover, sync).
+            - "--timeout=5m"
+          ports:
+            - containerPort: 9070
+              name: csi-addons
+              protocol: TCP
+          env:
+            - name: NODE_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: POD_UID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
+            - name: KUBERNETES_SERVICE_HOST
+              value: "127.0.0.1"
+            - name: KUBERNETES_SERVICE_PORT
+              value: "6443"
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65534
+            runAsGroup: 65533
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /csi
