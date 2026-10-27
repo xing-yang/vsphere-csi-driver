@@ -1,0 +1,31 @@
+# csi-addons controller and CRDs for a guest cluster, pinned to the release
+# whose csi-addons spec matches go.mod. Unlike on the Supervisor, the guest
+# has a pod network, so no host-network patches are needed.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - https://github.com/csi-addons/kubernetes-csi-addons/releases/download/v0.15.1/crds.yaml
+  - https://github.com/csi-addons/kubernetes-csi-addons/releases/download/v0.15.1/rbac.yaml
+  - https://github.com/csi-addons/kubernetes-csi-addons/releases/download/v0.15.1/setup-controller.yaml
+
+images:
+  # Push to a registry the guest cluster can pull from if quay.io is not
+  # reachable.
+  - name: quay.io/csiaddons/k8s-controller
+    newTag: v0.15.1
+
+patches:
+  # VKS guests enforce the restricted Pod Security level by default.
+  - target:
+      kind: Deployment
+      name: csi-addons-controller-manager
+    patch: |-
+      - op: add
+        path: /spec/template/spec/securityContext/seccompProfile
+        value:
+          type: RuntimeDefault
+      - op: add
+        path: /spec/template/spec/containers/0/securityContext/capabilities
+        value:
+          drop: ["ALL"]

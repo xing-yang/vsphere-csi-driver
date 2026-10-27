@@ -47,4 +47,8 @@ const (
 	// Depending on the value, either controller and node service will be
 	// activated (The identity service is always activated).
 	EnvVarMode = "X_CSI_MODE"
+
+	// EnvVarCSIAddonsEndpoint specifies the unix socket on which the controller
+	// serves the csi-addons Identity and Replication services.
+	EnvVarCSIAddonsEndpoint = "CSI_ADDONS_ENDPOINT"
 )

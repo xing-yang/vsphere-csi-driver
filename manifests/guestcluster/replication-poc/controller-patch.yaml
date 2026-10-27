@@ -1,0 +1,63 @@
+# Adds the csi-addons sidecar to the pvCSI controller. Apply it to the live
+# Deployment with `kubectl patch` (volume-replication-poc-vks-setup.md):
+# pvcsi.yaml is a template that VKS renders, so it cannot be used as a
+# kustomize base.
+kind: Deployment
+apiVersion: apps/v1
+metadata:
+  name: vsphere-csi-controller
+  namespace: vmware-system-csi
+spec:
+  template:
+    spec:
+      containers:
+        - name: vsphere-csi-controller
+          env:
+            - name: CSI_ADDONS_ENDPOINT
+              value: unix:///csi/csi-addons.sock
+        - name: csi-addons
+          image: quay.io/csiaddons/k8s-sidecar:v0.15.1
+          imagePullPolicy: IfNotPresent
+          args:
+            - "--node-id=$(NODE_ID)"
+            - "--csi-addons-address=/csi/csi-addons.sock"
+            # The guest controller uses the pod network, so the csi-addons
+            # controller reaches the sidecar at pod://<pod>.<ns>:9070.
+            - "--controller-port=9070"
+            - "--pod=$(POD_NAME)"
+            - "--namespace=$(POD_NAMESPACE)"
+            - "--pod-uid=$(POD_UID)"
+            - "--leader-election-namespace=$(POD_NAMESPACE)"
+            # Each replication RPC waits up to 30s for the Supervisor, then
+            # returns Aborted and the csi-addons controller retries.
+            - "--timeout=2m"
+          ports:
+            - containerPort: 9070
+              name: csi-addons
+              protocol: TCP
+          env:
+            - name: NODE_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: POD_UID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
+          # The same user as vsphere-csi-controller: it creates the socket
+          # with mode 0755, so only its owner can connect.
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /csi

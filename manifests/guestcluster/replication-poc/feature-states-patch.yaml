@@ -1,0 +1,10 @@
+# Enables the guest side of the volume-replication FSS. The Supervisor side is
+# the same key in the Supervisor csi-feature-states ConfigMap, which the
+# Supervisor syncer copies into the svfeaturestates CR of every namespace.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: internal-feature-states.csi.vsphere.vmware.com
+  namespace: vmware-system-csi
+data:
+  "volume-replication": "true"

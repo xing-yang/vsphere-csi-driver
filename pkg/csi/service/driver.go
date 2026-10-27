@@ -227,7 +227,42 @@ func (driver *vsphereCSIDriver) Run(ctx context.Context, endpoint string) {
 		log.Info("SnapshotMetadata service will be registered (CBT support enabled)")
 	}
 
+	// Serve the csi-addons Replication service on its own socket when the
+	// volume-replication FSS is enabled. In a guest cluster the FSS must also be
+	// enabled on the Supervisor, which does the replication.
+	if driver.mode == "controller" && (clusterFlavor == cnstypes.CnsClusterFlavorWorkload ||
+		clusterFlavor == cnstypes.CnsClusterFlavorGuest) &&
+		commonco.ContainerOrchestratorUtility != nil &&
+		commonco.ContainerOrchestratorUtility.IsFSSEnabled(ctx, common.VolumeReplication) {
+		driver.startCSIAddonsReplication(ctx)
+	}
+
 	//Start the nonblocking GRPC
 	grpc := NewNonBlockingGRPCServer()
 	grpc.Start(endpoint, driver, controllerServer, driver, snapshotMetadataServer)
+}
+
+// startCSIAddonsReplication starts the csi-addons server. Volume replication
+// is optional, so failures are logged and the CSI services keep running.
+func (driver *vsphereCSIDriver) startCSIAddonsReplication(ctx context.Context) {
+	log := logger.GetLogger(ctx)
+	endpoint := os.Getenv(csitypes.EnvVarCSIAddonsEndpoint)
+	if endpoint == "" {
+		log.Errorf("%s is enabled but %s is not set; csi-addons replication is disabled",
+			common.VolumeReplication, csitypes.EnvVarCSIAddonsEndpoint)
+		return
+	}
+	provider, ok := driver.cnscs.(csiAddonsReplicationProvider)
+	if !ok {
+		log.Errorf("controller does not support csi-addons replication")
+		return
+	}
+	ids, rs, err := provider.NewCSIAddonsReplicationServers(ctx, Version)
+	if err != nil {
+		log.Errorf("failed to create csi-addons replication services: %v", err)
+		return
+	}
+	if _, err := startCSIAddonsServer(ctx, endpoint, ids, rs); err != nil {
+		log.Errorf("failed to start csi-addons server: %v", err)
+	}
 }

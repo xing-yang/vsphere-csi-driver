@@ -752,6 +752,15 @@ const (
 	// Snap Service local protection is supported by the Supervisor.
 	SupportsSnapServiceLocalProtection = "supports_snap_service_local_protection"
 
+	// VolumeReplication is the FSS that enables the csi-addons Replication
+	// service. On the Supervisor it is set in the csi-feature-states ConfigMap,
+	// and the service is backed by vSphere Replication (HMS) CNS volume groups.
+	// In a guest cluster it requires the flag in both the guest PVCSI ConfigMap
+	// and the Supervisor csi-feature-states ConfigMap (two-ConfigMap gating),
+	// and pvCSI proxies every request to a VolumeReplication on the Supervisor.
+	// TODO: Replace with a WCP capability once HMS CNS replication ships.
+	VolumeReplication = "volume-replication"
+
 	// VKSRegisterVolume is the guest-cluster FSS that gates the VKSRegisterVolume
 	// operator. Requires the flag to be true in both the guest PVCSI ConfigMap and the
 	// Supervisor csi-feature-states ConfigMap (two-ConfigMap gating, not associated with

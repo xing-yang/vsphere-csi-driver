@@ -1,0 +1,27 @@
+# Supervisor: lets pvCSI of one guest cluster manage VolumeReplications in the
+# guest's Supervisor namespace. In production the VKS controller owns the
+# pvCSI Role; for the POC, fill in the placeholders and apply this on the
+# Supervisor with the admin kubeconfig (volume-replication-poc-vks-setup.md, step 3).
+kind: Role
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: pvcsi-volumereplication
+  namespace: SUPERVISOR_NAMESPACE
+rules:
+  - apiGroups: ["replication.storage.openshift.io"]
+    resources: ["volumereplications"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+---
+kind: RoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: pvcsi-volumereplication
+  namespace: SUPERVISOR_NAMESPACE
+subjects:
+  - kind: ServiceAccount
+    name: PVCSI_SERVICE_ACCOUNT
+    namespace: SUPERVISOR_NAMESPACE
+roleRef:
+  kind: Role
+  name: pvcsi-volumereplication
+  apiGroup: rbac.authorization.k8s.io
