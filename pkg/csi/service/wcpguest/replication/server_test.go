@@ -377,6 +377,17 @@ func TestResync(t *testing.T) {
 	}
 }
 
+func TestResyncAttached(t *testing.T) {
+	f := newFixture(t)
+	f.createVR(stateSecondary, 0, 0, statusSecondary,
+		condition{condDegraded, "True", "VolumeDegraded", ""}, condition{condResyncing, "True", "ResyncTriggered", ""})
+	f.attach()
+	_, err := f.server.ResyncVolume(context.Background(), &replication.ResyncVolumeRequest{
+		ReplicationSource: source(testVolume), Parameters: testParams,
+	})
+	wantCode(t, err, codes.FailedPrecondition, "guest-node-1")
+}
+
 func TestResyncMissing(t *testing.T) {
 	f := newFixture(t)
 	_, err := f.server.ResyncVolume(context.Background(), &replication.ResyncVolumeRequest{

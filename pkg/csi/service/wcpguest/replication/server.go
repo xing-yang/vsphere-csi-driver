@@ -407,7 +407,11 @@ func (s *Server) DemoteVolume(ctx context.Context,
 }
 
 // ResyncVolume reports whether the Supervisor considers the secondary volume
-// in sync. Replication runs on its own, so there is nothing to start.
+// in sync. The Supervisor csi-addons controller resyncs its secondary
+// VolumeReplication on its own, so there is nothing to start. On the old
+// primary site after a failover, that resync re-protects the volume: it
+// overwrites the volume with the data of the peer site. The Supervisor only
+// sees its own VolumeAttachments, so the guest attachment is checked here.
 func (s *Server) ResyncVolume(ctx context.Context,
 	req *replication.ResyncVolumeRequest) (*replication.ResyncVolumeResponse, error) {
 	ctx = logger.NewContextWithLogger(ctx)
@@ -428,6 +432,16 @@ func (s *Server) ResyncVolume(ctx context.Context,
 	if vr == nil {
 		return nil, logger.LogNewErrorCodef(log, codes.NotFound,
 			"Supervisor VolumeReplication %s/%s not found", s.cfg.SupervisorNamespace, r.volumeID)
+	}
+	pv, attached, err := guestAttachment(ctx, r.guest, r.volumeID)
+	if err != nil {
+		return nil, logger.LogNewErrorCodef(log, codes.Unavailable,
+			"failed to check guest attachments of volume %s: %v", r.volumeID, err)
+	}
+	if attached != "" {
+		return nil, logger.LogNewErrorCodef(log, codes.FailedPrecondition,
+			"volume %s (PV %s) is attached to guest node %s; stop the workload, a resync can overwrite "+
+				"the volume with the data of the peer site", r.volumeID, pv, attached)
 	}
 	if vr.Spec.ReplicationState != stateSecondary || !vr.observed() || vr.Status.State != statusSecondary {
 		log.Debugf("ResyncVolume: waiting for %s", vr)
