@@ -62,6 +62,9 @@ type Config struct {
 	// Peer logs in to the paired HMS through the local one. It is needed to
 	// configure and unconfigure replication.
 	Peer Credentials
+	// PeerEndpoint is the URL of the paired HMS. Reprotect runs there, on the
+	// site of the recovered group, logged in with the Peer credentials.
+	PeerEndpoint string
 }
 
 // TokenIssuer returns a delegable bearer SAML assertion from the STS of a vCenter.
@@ -76,6 +79,8 @@ type SOAPClient struct {
 	mu          sync.Mutex
 	loggedIn    bool
 	peerSession map[string]bool
+	// peer is the client for the paired HMS, created on first use.
+	peer *SOAPClient
 }
 
 var _ Client = &SOAPClient{}
@@ -462,4 +467,139 @@ func (c *SOAPClient) GroupDatastore(ctx context.Context, group *Group) (MoRef, e
 		return nil
 	})
 	return ds, err
+}
+
+// Peer implements Client. The peer client logs in with the peer credentials
+// and reaches back to this site with the local ones.
+func (c *SOAPClient) Peer(_ context.Context) (Client, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.peer != nil {
+		return c.peer, nil
+	}
+	if c.cfg.PeerEndpoint == "" {
+		return nil, fmt.Errorf("%w: the peer HMS endpoint is not configured", ErrPeerUnreachable)
+	}
+	peer, err := NewSOAPClient(Config{
+		Endpoint:  c.cfg.PeerEndpoint,
+		Namespace: c.cfg.Namespace,
+		Version:   c.cfg.Version,
+		Insecure:  c.cfg.Insecure,
+		Local:     c.cfg.Peer,
+		Peer:      c.cfg.Local,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("%w: peer HMS %s: %v", ErrPeerUnreachable, c.cfg.PeerEndpoint, err)
+	}
+	peer.issueToken = c.issueToken
+	c.peer = peer
+	return peer, nil
+}
+
+// runTask starts a task with start and waits for it.
+func (c *SOAPClient) runTask(ctx context.Context, peer *MoRef, op string,
+	start func() (MoRef, error)) error {
+	return c.do(ctx, peer, func() error {
+		task, err := start()
+		if err != nil {
+			return err
+		}
+		_, err = c.waitForTask(ctx, task, op)
+		return err
+	})
+}
+
+// PrepareRecovery implements Client. It reads the latest replica instance
+// from the peer HMS.
+func (c *SOAPClient) PrepareRecovery(ctx context.Context, group *Group, operationID string) error {
+	return c.runTask(ctx, group.Peer, "prepare recovery checkpoint", func() (MoRef, error) {
+		return prepareCnsRecovery(ctx, c.transport, group.Ref, operationID)
+	})
+}
+
+// SealRecovery implements Client. It hands the checkpoint to the peer HMS.
+func (c *SOAPClient) SealRecovery(ctx context.Context, group *Group, operationID string) error {
+	return c.runTask(ctx, group.Peer, "seal recovery checkpoint", func() (MoRef, error) {
+		return sealCnsRecovery(ctx, c.transport, group.Ref, operationID)
+	})
+}
+
+// RecoveredDisk implements Client.
+func (c *SOAPClient) RecoveredDisk(ctx context.Context, group *Group) (*DatastorePath, error) {
+	var disk *datastorePath
+	err := c.do(ctx, nil, func() error {
+		var err error
+		disk, err = getRecoveredCnsDisk(ctx, c.transport, group.Ref)
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	if disk == nil || disk.Datastore.Value == "" {
+		return nil, fmt.Errorf("HMS returned no recovered disk for group %s", group.Name)
+	}
+	return &DatastorePath{Datastore: disk.Datastore, Path: disk.Path, FileName: disk.FileName}, nil
+}
+
+// BindRecoveredVolume implements Client.
+func (c *SOAPClient) BindRecoveredVolume(ctx context.Context, group *Group, volumeID string,
+	datastore MoRef) error {
+	return c.runTask(ctx, nil, "bind recovered volume", func() (MoRef, error) {
+		return bindRecoveredCnsVolume(ctx, c.transport, group.Ref, volumeID, datastore)
+	})
+}
+
+// StartReprotect implements Client. The reverse configuration calls back to
+// the original site, so it needs a session to the peer of the group.
+func (c *SOAPClient) StartReprotect(ctx context.Context, group *Group, spec ReprotectSpec) error {
+	return c.do(ctx, group.Peer, func() error {
+		_, err := reverseConfigurePeReplication(ctx, c.transport, group.Ref, cnsPeReprotectSpec{
+			OperationID:         spec.OperationID,
+			RecoveredVolumeUUID: spec.VolumeID,
+			RecoveredDatastore:  spec.Datastore,
+			ForceFullSync:       spec.ForceFullSync,
+		})
+		return err
+	})
+}
+
+// ReprotectOperation implements Client. HMS rejects an unknown operation ID
+// as an invalid argument.
+func (c *SOAPClient) ReprotectOperation(ctx context.Context, operationID string) (*ReprotectOperation, error) {
+	var op *peReprotectOperation
+	err := c.do(ctx, nil, func() error {
+		var err error
+		op, err = getPeReprotectOperation(ctx, c.transport, operationID)
+		return err
+	})
+	if isFault(err, "InvalidArgument") {
+		return nil, fmt.Errorf("reprotect operation %s: %w", operationID, ErrNotFound)
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &ReprotectOperation{
+		OperationID:         op.OperationID,
+		OriginalGroupID:     op.OriginalGroupID,
+		Phase:               op.Phase,
+		ReverseGroup:        op.ReverseGroup,
+		SynchronizationMode: op.SynchronizationMode,
+		FallbackReason:      op.FallbackReason,
+		Error:               op.Error,
+	}, nil
+}
+
+// ResumeReprotect implements Client. Resuming repeats the reverse
+// configuration, which calls back to the original site with the caller's
+// session, so a session to the peer of the recovered group is opened if the
+// group is given.
+func (c *SOAPClient) ResumeReprotect(ctx context.Context, group *Group, operationID string) error {
+	var peer *MoRef
+	if group != nil {
+		peer = group.Peer
+	}
+	return c.do(ctx, peer, func() error {
+		_, err := resumePeReprotectOperation(ctx, c.transport, operationID)
+		return err
+	})
 }

@@ -128,7 +128,9 @@ func (f *fakeHMS) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		reply(`<HmsSessionManagerLoginHmsServerByTokenResponse xmlns="urn:hmssrv"><returnval/>` +
 			`</HmsSessionManagerLoginHmsServerByTokenResponse>`)
 	case "HmsReplicationManagerConfigureCnsVolumeReplication_Task", "HmsGroupUnconfigure_Task",
-		"HmsSecondaryGroupRecoverGroup_Task":
+		"HmsSecondaryGroupRecoverGroup_Task", "HmsPrepareCnsRecovery_Task", "HmsSealCnsRecovery_Task",
+		"HmsBindRecoveredCnsVolume_Task", "HmsReverseConfigurePeReplication_Task",
+		"HmsResumePeReprotectOperation_Task":
 		reply(fmt.Sprintf(`<%sResponse xmlns="urn:hmssrv"><returnval type="HmsTask">task-7</returnval></%sResponse>`,
 			method.Local, method.Local))
 	case "HmsGroupOnlineSync_Task":
@@ -149,6 +151,20 @@ func (f *fakeHMS) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		reply(fmt.Sprintf(`<HmsTaskGetInfoInternalResponse xmlns="urn:hmssrv"><returnval><key>task-7</key>`+
 			`<state>%s</state><result xsi:type="ManagedObjectReference" type="HmsPrimaryGroup">GID-3</result>`+
 			`</returnval></HmsTaskGetInfoInternalResponse>`, state))
+	case "HmsGetRecoveredCnsDisk":
+		reply(`<HmsGetRecoveredCnsDiskResponse xmlns="urn:hmssrv"><returnval>` +
+			`<datastore type="Datastore">datastore-34</datastore><path>hbr-pe-gid-GID-2</path>` +
+			`<fileName>cnsVolume.vmdk</fileName></returnval></HmsGetRecoveredCnsDiskResponse>`)
+	case "HmsGetPeReprotectOperation":
+		if !strings.Contains(body, "<operationId>"+testOperationID+"</operationId>") {
+			w.WriteHeader(http.StatusInternalServerError)
+			reply(fault("InvalidArgument", "A specified parameter was not correct: operationId"))
+			return
+		}
+		reply(`<HmsGetPeReprotectOperationResponse xmlns="urn:hmssrv"><returnval>` +
+			`<operationId>` + testOperationID + `</operationId><originalGroupId>GID-2</originalGroupId>` +
+			`<phase>complete</phase><reverseGroup type="HmsPrimaryGroup">GID-9</reverseGroup>` +
+			`<synchronizationMode>optimized</synchronizationMode></returnval></HmsGetPeReprotectOperationResponse>`)
 	case "HmsGroupGetPolicyProgress":
 		reply(`<HmsGroupGetPolicyProgressResponse xmlns="urn:hmssrv"><returnval>` +
 			`<currentGeneration>4</currentGeneration><lastSyncTimeMs>1500</lastSyncTimeMs>` +
@@ -159,6 +175,8 @@ func (f *fakeHMS) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		reply(fault("NotImplemented", method.Local))
 	}
 }
+
+const testOperationID = "065e02f7-e8de-5c9b-a3d5-a7e54cccc077"
 
 func newTestClient(t *testing.T) (*SOAPClient, *fakeHMS) {
 	t.Helper()
@@ -303,5 +321,140 @@ func TestEndpointURL(t *testing.T) {
 		if err != nil || got != want {
 			t.Errorf("endpointURL(%q) = %q, %v; want %q", in, got, err, want)
 		}
+	}
+}
+
+// resetTaskPolls makes the next task of the fake HMS take two polls.
+func (f *fakeHMS) resetTaskPolls() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.taskPolls = 0
+}
+
+func TestRecoveryCheckpointCalls(t *testing.T) {
+	c, f := newTestClient(t)
+	ctx := context.Background()
+	g := &Group{Ref: MoRef{Type: "HmsGroup", Value: "GID-2"}, Name: "cns-vol1",
+		Peer: &MoRef{Type: "HmsRemoteHmsServer", Value: "peer-1"}}
+	if err := c.PrepareRecovery(ctx, g, testOperationID); err != nil {
+		t.Fatal(err)
+	}
+	f.resetTaskPolls()
+	if err := c.SealRecovery(ctx, g, testOperationID); err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range []string{"HmsPrepareCnsRecovery_Task", "HmsSealCnsRecovery_Task"} {
+		want := `<_this type="HmsPrimaryGroup">GID-2</_this><operationId>` + testOperationID + `</operationId>`
+		if !strings.Contains(f.bodies[m], want) {
+			t.Errorf("%s lacks %s:\n%s", m, want, f.bodies[m])
+		}
+	}
+	// The checkpoint calls read the replica instances from the peer.
+	if f.bodies["HmsSessionManagerLoginHmsServerByToken"] == "" {
+		t.Error("no peer login")
+	}
+
+	disk, err := c.RecoveredDisk(ctx, g)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if *disk != (DatastorePath{Datastore: MoRef{Type: "Datastore", Value: "datastore-34"},
+		Path: "hbr-pe-gid-GID-2", FileName: "cnsVolume.vmdk"}) ||
+		disk.RelativePath() != "hbr-pe-gid-GID-2/cnsVolume.vmdk" {
+		t.Fatalf("disk %+v", disk)
+	}
+	if !strings.Contains(f.bodies["HmsGetRecoveredCnsDisk"], `<_this type="HmsSecondaryGroup">GID-2</_this>`) {
+		t.Fatalf("request %s", f.bodies["HmsGetRecoveredCnsDisk"])
+	}
+	f.resetTaskPolls()
+	if err := c.BindRecoveredVolume(ctx, g, "vol1", disk.Datastore); err != nil {
+		t.Fatal(err)
+	}
+	if want := `<volumeUuid>vol1</volumeUuid><datastore type="Datastore">datastore-34</datastore>`; !strings.Contains(
+		f.bodies["HmsBindRecoveredCnsVolume_Task"], want) {
+		t.Fatalf("bind request lacks %s:\n%s", want, f.bodies["HmsBindRecoveredCnsVolume_Task"])
+	}
+}
+
+func TestReprotectCalls(t *testing.T) {
+	c, f := newTestClient(t)
+	ctx := context.Background()
+	g := &Group{Ref: MoRef{Type: "HmsGroup", Value: "GID-2"}, Name: "cns-vol1",
+		Peer: &MoRef{Type: "HmsRemoteHmsServer", Value: "peer-1"}}
+	err := c.StartReprotect(ctx, g, ReprotectSpec{OperationID: testOperationID, VolumeID: "vol1",
+		Datastore: MoRef{Type: "Datastore", Value: "datastore-34"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := f.bodies["HmsReverseConfigurePeReplication_Task"]
+	want := `<_this type="HmsSecondaryGroup">GID-2</_this><spec xsi:type="HmsCnsPeReprotectSpec">` +
+		`<operationId>` + testOperationID + `</operationId><recoveredVolumeUuid>vol1</recoveredVolumeUuid>` +
+		`<recoveredDatastore type="Datastore">datastore-34</recoveredDatastore>` +
+		`<forceFullSync>false</forceFullSync></spec>`
+	if !strings.Contains(req, want) {
+		t.Fatalf("request lacks %s:\n%s", want, req)
+	}
+	if f.taskPolls != 0 {
+		t.Fatal("waited for the reprotect task")
+	}
+
+	op, err := c.ReprotectOperation(ctx, testOperationID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if op.Phase != ReprotectPhaseComplete || op.SynchronizationMode != "optimized" || op.OriginalGroupID != "GID-2" ||
+		op.ReverseGroup == nil || op.ReverseGroup.Value != "GID-9" {
+		t.Fatalf("operation %+v", op)
+	}
+	if _, err := c.ReprotectOperation(ctx, "11111111-2222-4333-8444-555555555555"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("unknown operation: %v", err)
+	}
+	if err := c.ResumeReprotect(ctx, nil, testOperationID); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(f.bodies["HmsResumePeReprotectOperation_Task"],
+		`<_this type="HmsReplicationManager">replication-manager</_this><operationId>`) {
+		t.Fatalf("resume request %s", f.bodies["HmsResumePeReprotectOperation_Task"])
+	}
+}
+
+func TestPeerClientSwapsCredentials(t *testing.T) {
+	c, _ := newTestClient(t)
+	if _, err := c.Peer(context.Background()); !errors.Is(err, ErrPeerUnreachable) {
+		t.Fatalf("peer without endpoint: %v", err)
+	}
+	peerHMS := &fakeHMS{t: t, bodies: map[string]string{}}
+	server := httptest.NewServer(peerHMS)
+	t.Cleanup(server.Close)
+	c.cfg.PeerEndpoint = server.URL + "/vrms"
+	p, err := c.Peer(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	g := &Group{Ref: MoRef{Value: "GID-2"}, Name: "cns-vol1", Peer: &MoRef{Type: "HmsRemoteHmsServer", Value: "peer-1"}}
+	if err := p.StartReprotect(context.Background(), g, ReprotectSpec{OperationID: testOperationID}); err != nil {
+		t.Fatal(err)
+	}
+	// The peer HMS is logged in to with a token from the peer vCenter, and
+	// reaches back to this site with a token from the local one.
+	if !strings.Contains(peerHMS.bodies["HmsSessionManagerLogin"], `ID="vc-b"`) {
+		t.Errorf("peer login: %s", peerHMS.bodies["HmsSessionManagerLogin"])
+	}
+	if !strings.Contains(peerHMS.bodies["HmsSessionManagerLoginHmsServerByToken"], `ID=&#34;vc-a&#34;`) {
+		t.Errorf("peer's login back: %s", peerHMS.bodies["HmsSessionManagerLoginHmsServerByToken"])
+	}
+	if again, _ := c.Peer(context.Background()); again != p {
+		t.Error("peer client is not cached")
+	}
+}
+
+func TestMissingMethodIsNotSupported(t *testing.T) {
+	err := error(&Fault{Type: "InvalidRequest", Message: "Invalid managed method 'HmsGetRecoveredCnsDisk' " +
+		"requested for Managed Object Type 'HmsSecondaryGroup' version 'hmssrv/9.2.1'"})
+	if !errors.Is(err, ErrNotSupported) {
+		t.Fatal("missing method is not ErrNotSupported")
+	}
+	if errors.Is(&Fault{Type: "InvalidRequest", Message: "Request missing value"}, ErrNotSupported) {
+		t.Fatal("other invalid requests are ErrNotSupported")
 	}
 }

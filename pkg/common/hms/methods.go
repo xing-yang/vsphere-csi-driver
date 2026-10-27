@@ -170,6 +170,63 @@ type recoverGroupRequest struct {
 	RecoveryType string   `xml:"recoveryType"`
 }
 
+// operationRequest is a method whose only parameter is a reprotect operation ID.
+type operationRequest struct {
+	XMLName     xml.Name
+	This        MoRef  `xml:"_this"`
+	OperationID string `xml:"operationId"`
+}
+
+// datastorePath is HmsDatastorePath.
+type datastorePath struct {
+	Datastore MoRef  `xml:"datastore"`
+	Path      string `xml:"path"`
+	FileName  string `xml:"fileName"`
+}
+
+type datastorePathResponse struct {
+	Returnval *datastorePath `xml:"returnval"`
+}
+
+type bindRecoveredCnsVolumeRequest struct {
+	XMLName    xml.Name `xml:"HmsBindRecoveredCnsVolume_Task"`
+	This       MoRef    `xml:"_this"`
+	VolumeUUID string   `xml:"volumeUuid"`
+	Datastore  MoRef    `xml:"datastore"`
+}
+
+// cnsPeReprotectSpec is HmsCnsPeReprotectSpec. The parameter is declared as
+// the base type HmsPeReprotectSpec, so the subtype goes in xsi:type. Base
+// type fields come first.
+type cnsPeReprotectSpec struct {
+	XsiType             string `xml:"xsi:type,attr"`
+	OperationID         string `xml:"operationId"`
+	RecoveredVolumeUUID string `xml:"recoveredVolumeUuid"`
+	RecoveredDatastore  MoRef  `xml:"recoveredDatastore"`
+	ForceFullSync       bool   `xml:"forceFullSync"`
+}
+
+type reverseConfigureRequest struct {
+	XMLName xml.Name           `xml:"HmsReverseConfigurePeReplication_Task"`
+	This    MoRef              `xml:"_this"`
+	Spec    cnsPeReprotectSpec `xml:"spec"`
+}
+
+// peReprotectOperation is HmsPeReprotectOperation.
+type peReprotectOperation struct {
+	OperationID         string `xml:"operationId"`
+	OriginalGroupID     string `xml:"originalGroupId"`
+	Phase               string `xml:"phase"`
+	ReverseGroup        *MoRef `xml:"reverseGroup"`
+	SynchronizationMode string `xml:"synchronizationMode"`
+	FallbackReason      string `xml:"fallbackReason"`
+	Error               string `xml:"error"`
+}
+
+type peReprotectOperationResponse struct {
+	Returnval peReprotectOperation `xml:"returnval"`
+}
+
 type taskInfoRequest struct {
 	XMLName xml.Name `xml:"HmsTaskGetInfoInternal"`
 	This    MoRef    `xml:"_this"`
@@ -280,6 +337,65 @@ func recoverGroup(ctx context.Context, t *soapTransport, group MoRef, spec Recov
 		Folder: spec.Folder, Pool: spec.Pool,
 		Sync: false, PowerOn: false, RecoveryType: string(spec.Type),
 	}, &res, "")
+	return res.Returnval, err
+}
+
+// primaryGroupRef and secondaryGroupRef give a group reference the type that
+// declares the method; list results may carry the base type.
+func primaryGroupRef(g MoRef) MoRef   { return MoRef{Type: "HmsPrimaryGroup", Value: g.Value} }
+func secondaryGroupRef(g MoRef) MoRef { return MoRef{Type: "HmsSecondaryGroup", Value: g.Value} }
+
+func prepareCnsRecovery(ctx context.Context, t *soapTransport, group MoRef, operationID string) (MoRef, error) {
+	var res moRefResponse
+	err := t.call(ctx, &operationRequest{XMLName: named("HmsPrepareCnsRecovery_Task"),
+		This: primaryGroupRef(group), OperationID: operationID}, &res, "")
+	return res.Returnval, err
+}
+
+func sealCnsRecovery(ctx context.Context, t *soapTransport, group MoRef, operationID string) (MoRef, error) {
+	var res moRefResponse
+	err := t.call(ctx, &operationRequest{XMLName: named("HmsSealCnsRecovery_Task"),
+		This: primaryGroupRef(group), OperationID: operationID}, &res, "")
+	return res.Returnval, err
+}
+
+func getRecoveredCnsDisk(ctx context.Context, t *soapTransport, group MoRef) (*datastorePath, error) {
+	var res datastorePathResponse
+	err := t.call(ctx, &groupRequest{XMLName: named("HmsGetRecoveredCnsDisk"), This: secondaryGroupRef(group)},
+		&res, "")
+	return res.Returnval, err
+}
+
+func bindRecoveredCnsVolume(ctx context.Context, t *soapTransport, group MoRef, volumeID string,
+	datastore MoRef) (MoRef, error) {
+	var res moRefResponse
+	err := t.call(ctx, &bindRecoveredCnsVolumeRequest{This: secondaryGroupRef(group), VolumeUUID: volumeID,
+		Datastore: datastore}, &res, "")
+	return res.Returnval, err
+}
+
+func reverseConfigurePeReplication(ctx context.Context, t *soapTransport, group MoRef,
+	spec cnsPeReprotectSpec) (MoRef, error) {
+	spec.XsiType = "HmsCnsPeReprotectSpec"
+	var res moRefResponse
+	err := t.call(ctx, &reverseConfigureRequest{This: secondaryGroupRef(group), Spec: spec}, &res, "")
+	return res.Returnval, err
+}
+
+func getPeReprotectOperation(ctx context.Context, t *soapTransport, operationID string) (
+	*peReprotectOperation, error) {
+	var res peReprotectOperationResponse
+	if err := t.call(ctx, &operationRequest{XMLName: named("HmsGetPeReprotectOperation"),
+		This: replicationManager, OperationID: operationID}, &res, ""); err != nil {
+		return nil, err
+	}
+	return &res.Returnval, nil
+}
+
+func resumePeReprotectOperation(ctx context.Context, t *soapTransport, operationID string) (MoRef, error) {
+	var res moRefResponse
+	err := t.call(ctx, &operationRequest{XMLName: named("HmsResumePeReprotectOperation_Task"),
+		This: replicationManager, OperationID: operationID}, &res, "")
 	return res.Returnval, err
 }
 

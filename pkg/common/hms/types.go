@@ -16,14 +16,16 @@ limitations under the License.
 
 // Package hms is a minimal client for the vSphere Replication HMS VMODL API
 // (hms.version.version29) covering CNS volume replication groups: configure,
-// progress, on-demand sync, unconfigure and disaster recovery. Only the calls
-// that the CSI driver needs are implemented.
+// progress, on-demand sync, unconfigure, disaster recovery and reprotect.
+// Only the calls that the CSI driver needs are implemented.
 package hms
 
 import (
 	"context"
 	"errors"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 // Group status values reported by HMS (HmsGroupStatus).
@@ -141,9 +143,75 @@ type RecoverSpec struct {
 	Type   RecoveryType
 }
 
+// DatastorePath is HmsDatastorePath, a file on a datastore.
+type DatastorePath struct {
+	Datastore MoRef
+	// Path is the folder relative to the datastore root.
+	Path     string
+	FileName string
+}
+
+// RelativePath returns the path of the file relative to the datastore root.
+func (p DatastorePath) RelativePath() string {
+	if p.FileName == "" {
+		return p.Path
+	}
+	return p.Path + "/" + p.FileName
+}
+
+// ReprotectSpec is HmsCnsPeReprotectSpec. It reverses a recovered CNS group:
+// the volume registered from the recovered disk becomes the source, and the
+// original source volume on the peer site becomes the target.
+type ReprotectSpec struct {
+	// OperationID identifies the operation and is reused for retries. Use
+	// ReprotectOperationID so that the checkpoint sealed at demote matches.
+	OperationID string
+	// VolumeID and Datastore are the CNS volume registered from the recovered
+	// disk, on the site of the recovered group.
+	VolumeID  string
+	Datastore MoRef
+	// ForceFullSync discards the sealed checkpoint and copies the whole disk.
+	ForceFullSync bool
+}
+
+// Reprotect phases reported by HMS (PeReprotectJournal).
+const (
+	ReprotectPhaseComplete = "complete"
+)
+
+// ReprotectOperation is HmsPeReprotectOperation, the durable progress of a
+// reprotect on the site of the recovered group.
+type ReprotectOperation struct {
+	OperationID     string
+	OriginalGroupID string
+	Phase           string
+	ReverseGroup    *MoRef
+	// SynchronizationMode is pending, optimized, fullSync or fileSync.
+	SynchronizationMode string
+	FallbackReason      string
+	// Error is set when the last attempt failed. Resume the operation to retry.
+	Error string
+}
+
+// reprotectNamespace makes reprotect operation IDs stable across sites.
+var reprotectNamespace = uuid.MustParse("6f1e3d0a-8c1b-4c55-9a43-3b7c0e6d2f10")
+
+// ReprotectOperationID returns the reprotect operation ID for a group. The
+// group ID is the same on both sites, so the source site can seal a recovery
+// checkpoint under the ID that the reprotect later uses on the target site.
+// A reprotect creates a group with a new ID, so every failover round gets
+// its own operation.
+func ReprotectOperationID(group *Group) string {
+	return uuid.NewSHA1(reprotectNamespace, []byte(group.Ref.Value)).String()
+}
+
 // Client is the subset of HMS that the CSI driver uses. All operations act on
 // the local HMS; Configure and Unconfigure also reach the peer HMS through the
-// local one.
+// local one. Peer returns a client for the peer HMS itself, which reprotect
+// needs because it runs on the site of the recovered group.
+//
+// The recovery checkpoint and reprotect calls need an HMS with CNS reprotect
+// support; older HMS builds return ErrNotSupported.
 type Client interface {
 	// LocalSite returns a name for the local site, for messages.
 	LocalSite() string
@@ -167,11 +235,41 @@ type Client interface {
 	// GroupDatastore returns the target datastore of a CNS group from its
 	// current spec, which is the datastore holding the replica.
 	GroupDatastore(ctx context.Context, group *Group) (MoRef, error)
+
+	// PrepareRecovery runs the final sync of a primary group and records it
+	// as the baseline of an optimized reprotect (HmsPrepareCnsRecovery). The
+	// writers must be stopped.
+	PrepareRecovery(ctx context.Context, group *Group, operationID string) error
+	// SealRecovery checks that the volume did not change since
+	// PrepareRecovery and hands the baseline to the secondary group
+	// (HmsSealCnsRecovery). The volume must be detached.
+	SealRecovery(ctx context.Context, group *Group, operationID string) error
+	// RecoveredDisk returns the committed disk of a recovered secondary group.
+	RecoveredDisk(ctx context.Context, group *Group) (*DatastorePath, error)
+	// BindRecoveredVolume records the CNS volume registered from the disk of
+	// a recovered secondary group (HmsBindRecoveredCnsVolume). The volume
+	// must be detached.
+	BindRecoveredVolume(ctx context.Context, group *Group, volumeID string, datastore MoRef) error
+	// StartReprotect starts reversing a recovered secondary group and returns
+	// without waiting (HmsReverseConfigurePeReplication). Follow it with
+	// ReprotectOperation.
+	StartReprotect(ctx context.Context, group *Group, spec ReprotectSpec) error
+	// ReprotectOperation returns a reprotect operation, or ErrNotFound.
+	ReprotectOperation(ctx context.Context, operationID string) (*ReprotectOperation, error)
+	// ResumeReprotect retries a failed reprotect operation without waiting.
+	// group is the recovered secondary group, or nil if it is gone.
+	ResumeReprotect(ctx context.Context, group *Group, operationID string) error
+	// Peer returns a client for the paired HMS, logged in with the peer
+	// credentials. It fails with ErrPeerUnreachable if the peer HMS endpoint
+	// is not configured.
+	Peer(ctx context.Context) (Client, error)
 }
 
 // ReplicaDiskPath returns the path of the replica disk of a secondary CNS
 // group, relative to the datastore root
-// (ConfigureReplicationSecondaryCnsWorkflow, PeTargetStorageHelper).
+// (ConfigureReplicationSecondaryCnsWorkflow, PeTargetStorageHelper). It does
+// not apply to reverse groups, which replicate into the original volume; use
+// RecoveredDisk where HMS supports it.
 func ReplicaDiskPath(group *Group) string {
 	return "hbr-pe-gid-" + group.Ref.Value + "/cnsVolume.vmdk"
 }

@@ -21,9 +21,13 @@ limitations under the License.
 // on the target site. Every driver talks only to the HMS of its own site, and
 // a recovered volume is registered on the target with its source volume ID.
 //
-// HMS does not support reprotect or failback for CNS groups, so after a
-// failover replication stops until it is configured again from the new
-// primary site.
+// After a failover, resyncing the old primary re-protects the volume: HMS
+// reverses the recovered group into the original volume on the old primary
+// site, which can then be promoted again (failback). The reverse
+// configuration runs on the HMS of the recovered group, so the old primary
+// site's driver drives it on the peer HMS. HMS builds without CNS reprotect
+// support stop replicating after a failover until replication is configured
+// again from the new primary site.
 package replication
 
 import (
@@ -358,8 +362,8 @@ func (s *Server) PromoteVolume(ctx context.Context,
 		}
 		if replicationStopped(primary) {
 			return nil, logger.LogNewErrorCodef(log, codes.FailedPrecondition,
-				"volume %s was failed over to the peer site; HMS does not support failback of CNS groups",
-				volumeID)
+				"volume %s was failed over to the peer site; set this VolumeReplication to secondary to "+
+					"re-protect it from the peer site before promoting it again", volumeID)
 		}
 		// Already the source site. Cancel a pending demote.
 		s.mu.Lock()
@@ -370,6 +374,12 @@ func (s *Server) PromoteVolume(ctx context.Context,
 		return &replication.PromoteVolumeResponse{}, nil
 	}
 
+	if primary != nil && replicationStopped(primary) {
+		// The secondary group is the reverse group of a reprotect that has
+		// not removed the original group yet.
+		return nil, logger.LogNewErrorCodef(log, codes.FailedPrecondition,
+			"group %q is being re-protected from the peer site; promote after the resync completes", name)
+	}
 	if secondary.Status != hms.StatusRecovered {
 		recoveryType := hms.RecoveryPlannedMigration
 		if req.GetForce() {
@@ -391,18 +401,41 @@ func (s *Server) PromoteVolume(ctx context.Context,
 			return nil, toStatus(log, "recover group", err)
 		}
 	}
-	if err := s.ensureVolume(ctx, client, volumeID, secondary, params); err != nil {
+	disk := recoveredDisk(ctx, client, secondary)
+	if err := s.ensureVolume(ctx, client, volumeID, secondary, disk, params); err != nil {
 		return nil, logger.LogNewErrorCodef(log, codes.Internal,
 			"group %q is recovered but volume %s is not available: %v", name, volumeID, err)
+	}
+	if disk != nil && !s.skipRegistration {
+		// Binding lets a later reprotect copy only what changed on this site.
+		if err := client.BindRecoveredVolume(ctx, secondary, volumeID, disk.Datastore); err != nil {
+			log.Warnf("PromoteVolume: could not bind volume %s to group %q: %v; "+
+				"a reprotect will copy the whole volume", volumeID, name, err)
+		}
 	}
 	log.Infof("PromoteVolume: volume %s is primary on this site", volumeID)
 	return &replication.PromoteVolumeResponse{}, nil
 }
 
-// ensureVolume registers the recovered replica disk with CNS under the
-// source volume ID, unless the volume already exists.
+// recoveredDisk returns the committed disk of a recovered group, or nil if
+// HMS cannot report it.
+func recoveredDisk(ctx context.Context, client hms.Client, group *hms.Group) *hms.DatastorePath {
+	disk, err := client.RecoveredDisk(ctx, group)
+	if err != nil {
+		if !errors.Is(err, hms.ErrNotSupported) {
+			logger.GetLogger(ctx).Warnf("HMS did not report the recovered disk of group %q: %v", group.Name, err)
+		}
+		return nil
+	}
+	return disk
+}
+
+// ensureVolume registers the recovered disk with CNS under the source volume
+// ID, unless the volume already exists. After a reprotect the recovered disk
+// is the original volume, which still exists. disk is the disk HMS reported;
+// if it is nil, the disk is the replica disk of the group.
 func (s *Server) ensureVolume(ctx context.Context, client hms.Client, volumeID string,
-	group *hms.Group, params *classParams) error {
+	group *hms.Group, disk *hms.DatastorePath, params *classParams) error {
 	log := logger.GetLogger(ctx)
 	vol, err := s.volumes.GetVolume(ctx, volumeID)
 	if err != nil {
@@ -415,6 +448,9 @@ func (s *Server) ensureVolume(ctx context.Context, client hms.Client, volumeID s
 	// replication, not where the incoming replica is.
 	replica := hms.ReplicaDiskPath(group)
 	dsMoID := params.replicaDatastore
+	if disk != nil {
+		replica, dsMoID = disk.RelativePath(), disk.Datastore.Value
+	}
 	if dsMoID == "" {
 		ds, err := client.GroupDatastore(ctx, group)
 		dsMoID = ds.Value
@@ -444,6 +480,10 @@ func (s *Server) ensureVolume(ctx context.Context, client hms.Client, volumeID s
 // must not be attached, and an on-demand sync ships the final data. The
 // controller calls it on every reconcile of a secondary volume, so the sync
 // runs once per demote. On the target site it is a no-op.
+//
+// Where HMS supports it, the final sync is sealed as a recovery checkpoint:
+// the reprotect after the target is promoted then copies only what changed
+// on the target.
 func (s *Server) DemoteVolume(ctx context.Context,
 	req *replication.DemoteVolumeRequest) (*replication.DemoteVolumeResponse, error) {
 	ctx = logger.NewContextWithLogger(ctx)
@@ -483,7 +523,7 @@ func (s *Server) DemoteVolume(ctx context.Context,
 		return nil, logger.LogNewErrorCodef(log, codes.FailedPrecondition,
 			"volume %s is attached; stop the workload before demoting", volumeID)
 	}
-	if err := client.OnlineSync(ctx, primary); err != nil {
+	if err := finalSync(ctx, client, primary); err != nil {
 		return nil, toStatus(log, "final sync", err)
 	}
 	s.mu.Lock()
@@ -493,9 +533,39 @@ func (s *Server) DemoteVolume(ctx context.Context,
 	return &replication.DemoteVolumeResponse{}, nil
 }
 
+// finalSync runs the last sync of a demoted primary group and seals it as a
+// recovery checkpoint. If HMS cannot seal one, a plain sync runs instead and
+// a later reprotect copies the whole volume. Errors that a retry can fix are
+// returned instead.
+func finalSync(ctx context.Context, client hms.Client, primary *hms.Group) error {
+	log := logger.GetLogger(ctx)
+	operationID := hms.ReprotectOperationID(primary)
+	err := client.PrepareRecovery(ctx, primary, operationID)
+	if err == nil {
+		err = client.SealRecovery(ctx, primary, operationID)
+	}
+	var fault *hms.Fault
+	switch {
+	case err == nil:
+		log.Infof("DemoteVolume: sealed recovery checkpoint %s of group %q", operationID, primary.Name)
+		return nil
+	case errors.Is(err, hms.ErrNotSupported):
+		log.Infof("DemoteVolume: HMS does not support recovery checkpoints; running a plain final sync")
+	case !errors.As(err, &fault), errors.Is(err, hms.ErrSyncOngoing), errors.Is(err, hms.ErrNotAuthenticated),
+		errors.Is(err, hms.ErrPeerUnreachable), errors.Is(err, hms.ErrInvalidState):
+		return err
+	default:
+		log.Warnf("DemoteVolume: could not seal a recovery checkpoint of group %q: %v; "+
+			"a reprotect after failover will copy the whole volume", primary.Name, err)
+	}
+	return client.OnlineSync(ctx, primary)
+}
+
 // ResyncVolume reports whether a secondary volume is in sync with its
-// primary. HMS replicates continuously, so there is nothing to start.
-// Re-protecting a volume after a failover is not supported by HMS.
+// primary. HMS replicates continuously, so there is nothing to start, except
+// on the old primary site after a failover: there it re-protects the volume
+// by reversing replication from the peer site into the local volume, which
+// overwrites the local volume with the data of the peer site.
 func (s *Server) ResyncVolume(ctx context.Context,
 	req *replication.ResyncVolumeRequest) (*replication.ResyncVolumeResponse, error) {
 	ctx = logger.NewContextWithLogger(ctx)
@@ -518,11 +588,12 @@ func (s *Server) ResyncVolume(ctx context.Context,
 		return nil, toStatus(log, "find replication group", err)
 	}
 	switch {
-	case secondary != nil && secondary.Status == hms.StatusRecovered,
-		primary != nil && replicationStopped(primary):
+	case primary != nil && replicationStopped(primary):
+		return s.reprotect(ctx, client, volumeID, primary)
+	case secondary != nil && secondary.Status == hms.StatusRecovered:
 		return nil, logger.LogNewErrorCodef(log, codes.FailedPrecondition,
-			"group %q was recovered; HMS does not support re-protecting CNS groups, "+
-				"disable and enable replication from the primary site", name)
+			"volume %s was recovered on this site and is the primary copy; "+
+				"resync the VolumeReplication on the peer site to re-protect it", volumeID)
 	case secondary != nil:
 		// notActive is the idle state between sync cycles.
 		ready := secondary.Status == hms.StatusOK || secondary.Status == hms.StatusSync ||
@@ -534,6 +605,81 @@ func (s *Server) ResyncVolume(ctx context.Context,
 	default:
 		return nil, logger.LogNewErrorCodef(log, codes.NotFound, "no replication group %q on this site", name)
 	}
+}
+
+// reprotect re-protects the volume of a primary group whose secondary group
+// the peer site recovered. The peer HMS reverses the recovered group into the
+// local volume and then removes the original group. That takes a sync, so
+// the first call starts it and later calls report its progress; once the
+// original group is gone, ResyncVolume reports the reverse group instead.
+func (s *Server) reprotect(ctx context.Context, client hms.Client, volumeID string,
+	primary *hms.Group) (*replication.ResyncVolumeResponse, error) {
+	log := logger.GetLogger(ctx)
+	name := primary.Name
+	notReady := &replication.ResyncVolumeResponse{Ready: false}
+	attached, err := s.volumes.IsAttached(ctx, volumeID)
+	if err != nil {
+		return nil, logger.LogNewErrorCodef(log, codes.Internal,
+			"failed to check attachment of volume %s: %v", volumeID, err)
+	}
+	if attached {
+		return nil, logger.LogNewErrorCodef(log, codes.FailedPrecondition,
+			"volume %s is attached; stop the workload, the resync overwrites it with the data of the peer site",
+			volumeID)
+	}
+	peer, err := client.Peer(ctx)
+	if err != nil {
+		return nil, logger.LogNewErrorCodef(log, codes.FailedPrecondition,
+			"group %q was recovered on the peer site; re-protecting it needs the peer HMS (secret key %q): %v",
+			name, SecretKeyPeerHMSEndpoint, err)
+	}
+	operationID := hms.ReprotectOperationID(primary)
+	op, err := peer.ReprotectOperation(ctx, operationID)
+	switch {
+	case errors.Is(err, hms.ErrNotSupported):
+		return nil, logger.LogNewErrorCodef(log, codes.FailedPrecondition,
+			"group %q was recovered; the HMS of the peer site does not support re-protecting CNS groups, "+
+				"delete the VolumeReplications and enable replication again from the new primary site", name)
+	case errors.Is(err, hms.ErrNotFound):
+		op = nil
+	case err != nil:
+		return nil, toStatus(log, "get reprotect operation", err)
+	}
+
+	recovered, err := peer.FindIncomingGroup(ctx, name)
+	if errors.Is(err, hms.ErrNotFound) {
+		recovered = nil
+	} else if err != nil {
+		return nil, toStatus(log, "find the recovered group on the peer site", err)
+	}
+	switch {
+	case op == nil:
+		if recovered == nil || recovered.Status != hms.StatusRecovered {
+			return nil, logger.LogNewErrorCodef(log, codes.FailedPrecondition,
+				"group %q stopped replicating but the peer site has no recovered group to re-protect from", name)
+		}
+		disk, err := peer.RecoveredDisk(ctx, recovered)
+		if err != nil {
+			return nil, toStatus(log, "get the recovered disk on the peer site", err)
+		}
+		if err := peer.StartReprotect(ctx, recovered, hms.ReprotectSpec{
+			OperationID: operationID, VolumeID: volumeID, Datastore: disk.Datastore,
+		}); err != nil {
+			return nil, toStatus(log, "start reprotect", err)
+		}
+		log.Infof("ResyncVolume: started reprotect %s of group %q from the peer site into volume %s",
+			operationID, name, volumeID)
+	case op.Error != "":
+		log.Warnf("ResyncVolume: reprotect %s of group %q failed in phase %s: %s; resuming it",
+			operationID, name, op.Phase, op.Error)
+		if err := peer.ResumeReprotect(ctx, recovered, operationID); err != nil {
+			return nil, toStatus(log, "resume reprotect", err)
+		}
+	default:
+		log.Infof("ResyncVolume: reprotect %s of group %q is in phase %s, synchronization %s",
+			operationID, name, op.Phase, op.SynchronizationMode)
+	}
+	return notReady, nil
 }
 
 // GetVolumeReplicationInfo reports the last replicated point in time and the
@@ -560,7 +706,7 @@ func (s *Server) GetVolumeReplicationInfo(ctx context.Context,
 		msg := fmt.Sprintf("no primary group %q on site %q; the volume is not replicated", name, client.LocalSite())
 		if secondary != nil && secondary.Status == hms.StatusRecovered {
 			msg = fmt.Sprintf("volume was recovered from group %q and is not replicated; "+
-				"HMS does not support re-protecting CNS groups", name)
+				"set the VolumeReplication on the peer site to secondary to re-protect it", name)
 		}
 		log.Warnf("GetVolumeReplicationInfo: %s", msg)
 		return &replication.GetVolumeReplicationInfoResponse{
@@ -592,7 +738,8 @@ func (s *Server) GetVolumeReplicationInfo(ctx context.Context,
 	switch {
 	case replicationStopped(primary):
 		resp.Status = replication.GetVolumeReplicationInfoResponse_ERROR
-		resp.StatusMessage = fmt.Sprintf("group %q stopped replicating because the peer site recovered it", name)
+		resp.StatusMessage = fmt.Sprintf("group %q stopped replicating because the peer site recovered it; "+
+			"set this VolumeReplication to secondary to re-protect it", name)
 	case primary.Status == hms.StatusError:
 		resp.Status = replication.GetVolumeReplicationInfoResponse_ERROR
 		resp.StatusMessage = fmt.Sprintf("group %q is in error", name)

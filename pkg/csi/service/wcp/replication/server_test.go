@@ -112,7 +112,8 @@ func TestPromoteFindsReplicaWithoutGroupSpec(t *testing.T) {
 	}
 	vols := newFakeVolumes()
 	vols.files = map[string]string{hms.ReplicaDiskPath(g): "datastore-77"}
-	client := noSpecClient{fabric.Site(siteB)}
+	// An HMS without GetRecoveredCnsDisk.
+	client := noSpecClient{oldHMS{fabric.Site(siteB)}}
 	b := NewServer(func(context.Context, map[string]string) (hms.Client, error) { return client, nil }, vols)
 	if err := promote(&testSite{server: b, volumes: vols}, false); err != nil {
 		t.Fatal(err)
@@ -123,7 +124,7 @@ func TestPromoteFindsReplicaWithoutGroupSpec(t *testing.T) {
 }
 
 func TestPromoteUsesReplicaDatastoreParameter(t *testing.T) {
-	_, a, b := newSites(t)
+	_, a, b := newSitesWith(t, func(c hms.Client) hms.Client { return oldHMS{c} })
 	if err := enable(t, a); err != nil {
 		t.Fatal(err)
 	}
@@ -326,12 +327,10 @@ func TestPlannedMigration(t *testing.T) {
 		t.Fatalf("old primary status %s", res.Status)
 	}
 	if res := info(t, b); res.Status != replication.GetVolumeReplicationInfoResponse_ERROR ||
-		!strings.Contains(res.StatusMessage, "re-protecting") {
+		!strings.Contains(res.StatusMessage, "re-protect") {
 		t.Fatalf("new primary status %s: %s", res.Status, res.StatusMessage)
 	}
-	_, err = resync(a)
-	wantCode(t, err, codes.FailedPrecondition)
-	// Failback is not supported.
+	// Failing back needs a resync first.
 	wantCode(t, promote(a, false), codes.FailedPrecondition)
 
 	if _, err := a.server.DisableVolumeReplication(context.Background(),
@@ -413,5 +412,221 @@ func TestFakeTargetRolePromote(t *testing.T) {
 	g, err := client.FindIncomingGroup(context.Background(), groupName(volumeID))
 	if err != nil || g.Status != hms.StatusRecovered {
 		t.Fatalf("group %+v %v", g, err)
+	}
+}
+
+// oldHMS is an HMS build without CNS reprotect support, which rejects the
+// methods it does not have.
+type oldHMS struct{ hms.Client }
+
+var errNoMethod = &hms.Fault{Type: "InvalidRequest",
+	Message: "Invalid managed method 'HmsGetPeReprotectOperation' requested for Managed Object Type"}
+
+func (oldHMS) PrepareRecovery(context.Context, *hms.Group, string) error { return errNoMethod }
+func (oldHMS) SealRecovery(context.Context, *hms.Group, string) error    { return errNoMethod }
+func (oldHMS) RecoveredDisk(context.Context, *hms.Group) (*hms.DatastorePath, error) {
+	return nil, errNoMethod
+}
+func (oldHMS) BindRecoveredVolume(context.Context, *hms.Group, string, hms.MoRef) error {
+	return errNoMethod
+}
+func (oldHMS) StartReprotect(context.Context, *hms.Group, hms.ReprotectSpec) error {
+	return errNoMethod
+}
+func (oldHMS) ReprotectOperation(context.Context, string) (*hms.ReprotectOperation, error) {
+	return nil, errNoMethod
+}
+func (oldHMS) ResumeReprotect(context.Context, *hms.Group, string) error { return errNoMethod }
+func (o oldHMS) Peer(ctx context.Context) (hms.Client, error) {
+	peer, err := o.Client.Peer(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return oldHMS{peer}, nil
+}
+
+// noPeerHMS has no peer HMS endpoint configured.
+type noPeerHMS struct{ hms.Client }
+
+func (noPeerHMS) Peer(context.Context) (hms.Client, error) {
+	return nil, hms.ErrPeerUnreachable
+}
+
+// newSitesWith is newSites with the clients wrapped by wrap.
+func newSitesWith(t *testing.T, wrap func(hms.Client) hms.Client) (*hms.FakeFabric, *testSite, *testSite) {
+	t.Helper()
+	fabric := hms.NewFakeFabric(siteA, siteB)
+	site := func(name string, vols *fakeVolumes) *testSite {
+		client := wrap(fabric.Site(name))
+		return &testSite{
+			server: NewServer(func(context.Context, map[string]string) (hms.Client, error) {
+				return client, nil
+			}, vols),
+			volumes: vols,
+		}
+	}
+	return fabric, site(siteA, newFakeVolumes(volumeID)), site(siteB, newFakeVolumes())
+}
+
+func wantReady(t *testing.T, s *testSite, want bool) {
+	t.Helper()
+	res, err := resync(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Ready != want {
+		t.Fatalf("resync ready %t, want %t", res.Ready, want)
+	}
+}
+
+func wantHealthy(t *testing.T, s *testSite) {
+	t.Helper()
+	if res := info(t, s); res.Status != replication.GetVolumeReplicationInfoResponse_HEALTHY {
+		t.Fatalf("status %s: %s", res.Status, res.StatusMessage)
+	}
+}
+
+// reprotectMode returns the synchronization mode of the reprotect of group on site.
+func reprotectMode(t *testing.T, fabric *hms.FakeFabric, site string, group *hms.Group) string {
+	t.Helper()
+	op, err := fabric.Site(site).ReprotectOperation(context.Background(), hms.ReprotectOperationID(group))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if op.Phase != hms.ReprotectPhaseComplete {
+		t.Fatalf("reprotect phase %s", op.Phase)
+	}
+	return op.SynchronizationMode
+}
+
+func TestFailoverReprotectAndFailback(t *testing.T) {
+	fabric, a, b := newSites(t)
+	ctx := context.Background()
+	name := groupName(volumeID)
+	if err := enable(t, a); err != nil {
+		t.Fatal(err)
+	}
+	forward, err := fabric.Site(siteA).FindOutgoingGroup(ctx, name)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Planned migration to site B. The demote seals a recovery checkpoint.
+	if err := demote(a); err != nil {
+		t.Fatal(err)
+	}
+	if err := promote(b, false); err != nil {
+		t.Fatal(err)
+	}
+	if url := b.volumes.registered[volumeID]; !strings.Contains(url, "hbr-pe-gid-"+forward.Ref.Value) ||
+		!strings.Contains(url, targetDatastore) {
+		t.Fatalf("registered disk %q", url)
+	}
+
+	// Site A stays secondary and resyncs, which re-protects the volume.
+	wantCode(t, promote(a, false), codes.FailedPrecondition)
+	a.volumes.attached[volumeID] = true
+	_, err = resync(a)
+	wantCode(t, err, codes.FailedPrecondition)
+	a.volumes.attached[volumeID] = false
+	fabric.HoldReprotects(true)
+	wantReady(t, a, false) // starts the reprotect
+	wantReady(t, a, false) // still running
+	fabric.HoldReprotects(false)
+	fabric.FinishReprotects()
+	wantReady(t, a, true)
+	if mode := reprotectMode(t, fabric, siteB, forward); mode != "optimized" {
+		t.Fatalf("reprotect mode %s", mode)
+	}
+	wantHealthy(t, b)
+	if err := demote(a); err != nil {
+		t.Fatalf("demote of the new secondary: %v", err)
+	}
+
+	// Fail back to site A. Its original volume is the replica, so nothing is
+	// registered.
+	reverse, err := fabric.Site(siteB).FindOutgoingGroup(ctx, name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reverse.Ref.Value == forward.Ref.Value {
+		t.Fatal("reprotect kept the group ID")
+	}
+	if err := demote(b); err != nil {
+		t.Fatal(err)
+	}
+	if err := enable(t, a); err != nil {
+		t.Fatal(err)
+	}
+	if err := promote(a, false); err != nil {
+		t.Fatal(err)
+	}
+	if len(a.volumes.registered) != 0 {
+		t.Fatalf("registered %v on the original site", a.volumes.registered)
+	}
+	wantReady(t, b, false)
+	wantReady(t, b, true)
+	if mode := reprotectMode(t, fabric, siteA, reverse); mode != "optimized" {
+		t.Fatalf("second reprotect mode %s", mode)
+	}
+	wantHealthy(t, a)
+	if _, err := fabric.Site(siteB).FindOutgoingGroup(ctx, name); err == nil {
+		t.Fatal("reverse group still exists after the second reprotect")
+	}
+}
+
+func TestReprotectWithoutCheckpointCopiesWholeVolume(t *testing.T) {
+	fabric, a, b := newSites(t)
+	if err := enable(t, a); err != nil {
+		t.Fatal(err)
+	}
+	forward, err := fabric.Site(siteA).FindOutgoingGroup(context.Background(), groupName(volumeID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Unplanned failover: no demote on site A.
+	if err := promote(b, true); err != nil {
+		t.Fatal(err)
+	}
+	wantReady(t, a, false)
+	wantReady(t, a, true)
+	if mode := reprotectMode(t, fabric, siteB, forward); mode != "fullSync" {
+		t.Fatalf("reprotect mode %s", mode)
+	}
+}
+
+func TestFailoverWithoutReprotectSupport(t *testing.T) {
+	_, a, b := newSitesWith(t, func(c hms.Client) hms.Client { return oldHMS{c} })
+	if err := enable(t, a); err != nil {
+		t.Fatal(err)
+	}
+	if err := demote(a); err != nil {
+		t.Fatalf("demote falls back to a plain sync: %v", err)
+	}
+	if err := promote(b, false); err != nil {
+		t.Fatal(err)
+	}
+	if url := b.volumes.registered[volumeID]; !strings.Contains(url, "hbr-pe-gid-") {
+		t.Fatalf("registered disk %q", url)
+	}
+	_, err := resync(a)
+	wantCode(t, err, codes.FailedPrecondition)
+	if !strings.Contains(err.Error(), "does not support re-protecting") {
+		t.Fatalf("resync error %v", err)
+	}
+}
+
+func TestResyncNeedsPeerHMS(t *testing.T) {
+	_, a, b := newSitesWith(t, func(c hms.Client) hms.Client { return noPeerHMS{c} })
+	if err := enable(t, a); err != nil {
+		t.Fatal(err)
+	}
+	if err := promote(b, true); err != nil {
+		t.Fatal(err)
+	}
+	_, err := resync(a)
+	wantCode(t, err, codes.FailedPrecondition)
+	if !strings.Contains(err.Error(), SecretKeyPeerHMSEndpoint) {
+		t.Fatalf("resync error %v", err)
 	}
 }

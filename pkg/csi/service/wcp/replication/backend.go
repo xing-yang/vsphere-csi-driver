@@ -55,9 +55,13 @@ const (
 	// SecretKeyPeerVCHost, SecretKeyPeerSSOUser and SecretKeyPeerSSOPassword
 	// log in to the peer HMS. They are needed on the source site to enable
 	// and disable replication.
-	SecretKeyPeerVCHost         = "peerVcHost"
-	SecretKeyPeerSSOUser        = "peerSsoUser"
-	SecretKeyPeerSSOPassword    = "peerSsoPassword"
+	SecretKeyPeerVCHost      = "peerVcHost"
+	SecretKeyPeerSSOUser     = "peerSsoUser"
+	SecretKeyPeerSSOPassword = "peerSsoPassword"
+	// SecretKeyPeerHMSEndpoint is the HMS of the peer site, for example
+	// "https://peer-dpva/vrms". Resync after a failover runs the reprotect
+	// there, on the site of the recovered group, with the peer credentials.
+	SecretKeyPeerHMSEndpoint    = "peerHmsEndpoint"
 	SecretKeyInsecureSkipVerify = "insecureSkipVerify"
 	// SecretKeyHMSNamespace and SecretKeyHMSVersion override the SOAP
 	// namespace and version of the HMS VMODL.
@@ -146,6 +150,7 @@ func hmsConfig(secrets map[string]string, defaultVCHost func() string) (hms.Conf
 			User:     secrets[SecretKeyPeerSSOUser],
 			Password: secrets[SecretKeyPeerSSOPassword],
 		},
+		PeerEndpoint: secrets[SecretKeyPeerHMSEndpoint],
 	}
 	if cfg.Endpoint == "" {
 		cfg.Endpoint = os.Getenv(csitypes.EnvVarReplicationEndpoint)

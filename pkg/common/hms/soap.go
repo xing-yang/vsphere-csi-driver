@@ -101,7 +101,9 @@ func (f *Fault) Is(target error) bool {
 	case ErrNotFound:
 		return has("NotFound", "GroupNotConfigured")
 	case ErrNotSupported:
-		return has("NotSupported", "NotImplemented")
+		// An HMS build without a method rejects it as an invalid request.
+		return has("NotSupported", "NotImplemented") ||
+			(has("InvalidRequest") && strings.Contains(f.Message, "Invalid managed method"))
 	case ErrAlreadyRecovered:
 		return has("AlreadyRecovered", "GroupCommittedToImage")
 	case ErrSyncOngoing:
