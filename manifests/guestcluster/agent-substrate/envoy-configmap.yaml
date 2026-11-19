@@ -1,0 +1,80 @@
+# Envoy configuration for the Agent Substrate mTLS sidecar on vsphere-csi-controller.
+# It accepts only the ate-api-server's pod identity and proxies the connection to the
+# driver's unix socket. Change the SPIFFE ID if Substrate is not installed in ate-system.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: vsphere-csi-substrate-envoy-config
+  namespace: vmware-system-csi
+data:
+  envoy.yaml: |
+    node:
+      id: vsphere-csi-substrate-envoy
+      cluster: vsphere-csi-substrate-envoy
+    static_resources:
+      listeners:
+      - name: csi_tls_listener
+        address:
+          socket_address: { address: 0.0.0.0, port_value: 10000 }
+        filter_chains:
+        - transport_socket:
+            name: envoy.transport_sockets.tls
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.DownstreamTlsContext
+              require_client_certificate: true
+              common_tls_context:
+                tls_params:
+                  tls_minimum_protocol_version: TLSv1_3
+                alpn_protocols:
+                - h2
+                tls_certificate_sds_secret_configs:
+                - name: servicedns_serving_cert
+                  sds_config:
+                    resource_api_version: V3
+                    path_config_source:
+                      path: /etc/envoy/sds-servicedns-cert.yaml
+                combined_validation_context:
+                  default_validation_context:
+                    match_typed_subject_alt_names:
+                    - san_type: URI
+                      matcher:
+                        exact: "spiffe://cluster.local/ns/ate-system/sa/ate-api-server"
+                  validation_context_sds_secret_config:
+                    name: podidentity_validation_context
+                    sds_config:
+                      resource_api_version: V3
+                      path_config_source:
+                        path: /etc/envoy/sds-podidentity-validation.yaml
+          filters:
+          - name: envoy.filters.network.tcp_proxy
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.filters.network.tcp_proxy.v3.TcpProxy
+              stat_prefix: csi_proxy
+              cluster: csi_unix_socket
+      clusters:
+      - name: csi_unix_socket
+        connect_timeout: 0.25s
+        type: STATIC
+        load_assignment:
+          cluster_name: csi_unix_socket
+          endpoints:
+          - lb_endpoints:
+            - endpoint:
+                address:
+                  pipe:
+                    path: /csi/csi.sock
+  sds-servicedns-cert.yaml: |
+    resources:
+    - "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.Secret
+      name: servicedns_serving_cert
+      tls_certificate:
+        certificate_chain: { filename: /run/servicedns/credential-bundle.pem }
+        private_key: { filename: /run/servicedns/credential-bundle.pem }
+        watched_directory: { path: /run/servicedns }
+  sds-podidentity-validation.yaml: |
+    resources:
+    - "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.Secret
+      name: podidentity_validation_context
+      validation_context:
+        trusted_ca: { filename: /run/podidentity-ca/trust-bundle.pem }
+        watched_directory: { path: /run/podidentity-ca }

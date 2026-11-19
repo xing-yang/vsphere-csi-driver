@@ -1,0 +1,17 @@
+# Strategic merge patch for the vsphere-csi-node DaemonSet: mounts the Agent Substrate node
+# directory. atelet asks the node plugin to stage volumes under /var/lib/ate/staging and to
+# publish them under /var/lib/ate/actors, so the mounts must propagate back to the host.
+spec:
+  template:
+    spec:
+      containers:
+      - name: vsphere-csi-node
+        volumeMounts:
+        - name: substrate-dir
+          mountPath: /var/lib/ate
+          mountPropagation: "Bidirectional"
+      volumes:
+      - name: substrate-dir
+        hostPath:
+          path: /var/lib/ate
+          type: DirectoryOrCreate

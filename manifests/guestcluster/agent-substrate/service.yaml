@@ -1,0 +1,18 @@
+# TCP endpoint for the Agent Substrate API server (ate-api-server). It fronts the Envoy
+# sidecar added by controller-envoy-patch.yaml, which terminates mTLS and forwards to the
+# driver's unix socket. Create it before patching the controller: Substrate's servicedns
+# signer issues the sidecar's serving certificate for this Service's DNS name.
+apiVersion: v1
+kind: Service
+metadata:
+  name: vsphere-csi-controller-substrate
+  namespace: vmware-system-csi
+  labels:
+    app: vsphere-csi-controller
+spec:
+  selector:
+    app: vsphere-csi-controller
+  ports:
+  - name: grpc
+    port: 50052
+    targetPort: 10000

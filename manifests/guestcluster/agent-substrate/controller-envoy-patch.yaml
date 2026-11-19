@@ -1,0 +1,64 @@
+# Strategic merge patch for the vsphere-csi-controller Deployment: adds the Envoy sidecar
+# that exposes the CSI controller socket to the Agent Substrate API server over mTLS.
+# The pod certificate volumes need Substrate's pod certificate signers
+# (servicedns.podcert.ate.dev and podidentity.podcert.ate.dev) and the PodCertificateRequest
+# and ClusterTrustBundle Kubernetes APIs.
+spec:
+  template:
+    spec:
+      containers:
+      - name: substrate-envoy
+        image: envoyproxy/envoy:v1.39.5@sha256:8fc594a5d85eb76dca24155cfb9208882406873932b20cf33649a0a611194c43
+        command:
+        - /usr/local/bin/envoy
+        args:
+        - -c
+        - /etc/envoy/envoy.yaml
+        readinessProbe:
+          tcpSocket:
+            port: 10000
+          periodSeconds: 5
+        securityContext:
+          # Same user as the vsphere-csi-controller container, which creates csi.sock owned
+          # by 65532 with mode 0755: connecting needs write permission on the socket, and
+          # with all capabilities dropped even root cannot override that.
+          runAsNonRoot: true
+          runAsUser: 65532
+          runAsGroup: 65532
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+            - ALL
+        volumeMounts:
+        - mountPath: /etc/envoy
+          name: substrate-envoy-config
+          readOnly: true
+        - mountPath: /csi
+          name: socket-dir
+        - mountPath: /run/servicedns
+          name: substrate-servicedns-certs
+          readOnly: true
+        - mountPath: /run/podidentity-ca
+          name: substrate-podidentity-ca
+          readOnly: true
+      volumes:
+      - name: substrate-envoy-config
+        configMap:
+          name: vsphere-csi-substrate-envoy-config
+      - name: substrate-servicedns-certs
+        projected:
+          sources:
+          - podCertificate:
+              signerName: servicedns.podcert.ate.dev/identity
+              keyType: ECDSAP256
+              credentialBundlePath: credential-bundle.pem
+      - name: substrate-podidentity-ca
+        projected:
+          sources:
+          - clusterTrustBundle:
+              signerName: podidentity.podcert.ate.dev/identity
+              labelSelector:
+                matchLabels:
+                  podcert.ate.dev/canarying: live
+              path: trust-bundle.pem

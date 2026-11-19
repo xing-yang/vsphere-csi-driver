@@ -701,6 +701,12 @@ const (
 	// FSS or capability for it.
 	GuestNFSVolume = "guest-nfs-volume"
 
+	// AgentSubstrateSupportFSS gates support for Agent Substrate external volumes. Agent
+	// Substrate calls the CSI controller and node services directly, without PVC, PV or
+	// VolumeAttachment objects (see substrate.go). In pvCSI it needs no Supervisor
+	// capability: the Supervisor only sees ordinary Supervisor PVCs.
+	AgentSubstrateSupportFSS = "agent-substrate-support"
+
 	// VMPVCStoragePolicyMutability is the WCP capability for the DevOps storage-policy
 	// change feature on VMs and PVCs. When enabled on the supervisor, the CSI driver
 	// will advertise the CSI MODIFY_VOLUME capability and accept ControllerModifyVolume

@@ -460,6 +460,19 @@ func (c *controller) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequ
 			volumeType = prometheus.PrometheusFileVolumeType
 			return c.createGuestNFSVolume(ctx, req)
 		}
+		// Agent Substrate calls CreateVolume directly, without a guest PVC: the request
+		// carries the raw StorageClass parameters and no PVC/PV metadata parameters.
+		isSubstrateRequest := commonco.ContainerOrchestratorUtility.IsFSSEnabled(ctx,
+			common.AgentSubstrateSupportFSS) && common.IsSubstrateCreateRequest(req)
+		if isSubstrateRequest {
+			params, err := common.NormalizeSubstrateParams(req.GetParameters())
+			if err != nil {
+				return nil, csifault.CSIInvalidArgumentFault, logger.LogNewErrorCode(log,
+					codes.InvalidArgument, err.Error())
+			}
+			req.Parameters = params
+			log.Infof("CreateVolume: %q is an Agent Substrate volume request", req.Name)
+		}
 		err := validateGuestClusterCreateVolumeRequest(ctx, req)
 		if err != nil {
 			log.Errorf("validation for CreateVolume Request: %+v has failed. Error: %+v",
@@ -490,8 +503,9 @@ func (c *controller) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequ
 			common.HostLocalStorageSupportFSS)
 
 		// Get PVC name and disk size for the supervisor cluster
-		// We use default prefix 'pvc-' for pvc created in the guest cluster, it is mandatory.
-		supervisorPVCName := c.tanzukubernetesClusterUID + "-" + req.Name[4:]
+		// We use default prefix 'pvc-' for pvc created in the guest cluster, it is mandatory
+		// for every request other than an Agent Substrate one.
+		supervisorPVCName := supervisorPVCNameFor(c.tanzukubernetesClusterUID, req.Name, isSubstrateRequest)
 		var volumeSnapshotName string
 
 		// Volume Size - Default is 10 GiB
@@ -547,7 +561,9 @@ func (c *controller) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequ
 			}
 		}
 
-		if commonco.ContainerOrchestratorUtility.IsFSSEnabled(ctx, common.LinkedCloneSupportFSS) {
+		// An Agent Substrate request has no guest PVC to carry the linked clone label.
+		if !isSubstrateRequest &&
+			commonco.ContainerOrchestratorUtility.IsFSSEnabled(ctx, common.LinkedCloneSupportFSS) {
 			// Check if this is a LinkedClone request
 			isLinkedCloneRequest, err = commonco.ContainerOrchestratorUtility.IsLinkedCloneRequest(ctx, pvcName, pvcNamespace)
 			if err != nil {
@@ -587,6 +603,9 @@ func (c *controller) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequ
 				annotations := make(map[string]string)
 				key := fmt.Sprintf("%s/%s", c.tanzukubernetesClusterName, c.guestClusterDist)
 				labels[key] = c.tanzukubernetesClusterUID
+				if isSubstrateRequest {
+					labels[common.SubstrateVolumeLabel] = "true"
+				}
 
 				// FVS DevOps zone override: when a guest PVC for the new vSAN File Service has
 				// csi.vsphere.volume-requested-topology set by DevOps, propagate it to the
@@ -597,8 +616,11 @@ func (c *controller) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequ
 				// IsVsanFileVolumeServiceEnabled FSS so behavior is unchanged when FSS is off.
 				// Limited to file volumes whose storage class is an FVS SC; block volumes and
 				// legacy file volumes are unaffected.
+				// The override is read from the guest PVC, which an Agent Substrate volume
+				// does not have.
 				fvsTopologyOverridden := false
-				if IsVsanFileVolumeServiceEnabled && isFileVolumeRequest && !isLinkedCloneRequest {
+				if IsVsanFileVolumeServiceEnabled && isFileVolumeRequest && !isLinkedCloneRequest &&
+					!isSubstrateRequest {
 					if pvcName == "" || pvcNamespace == "" {
 						msg := fmt.Sprintf("missing guest PVC name/namespace parameters; "+
 							"cannot evaluate FVS topology override for supervisor PVC %s",
@@ -692,7 +714,8 @@ func (c *controller) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequ
 					}
 					annotations[common.AnnGuestClusterRequestedTopology] = topologyAnnotation
 				}
-				if commonco.ContainerOrchestratorUtility.IsFSSEnabled(ctx, common.ImprovedVolumeVisibility) {
+				if !isSubstrateRequest &&
+					commonco.ContainerOrchestratorUtility.IsFSSEnabled(ctx, common.ImprovedVolumeVisibility) {
 					guestPvcAnnotJSON, err := json.Marshal(guestPvcAnnot)
 					if err != nil {
 						log.Errorf("failed to marshal guest cluster annotation: %+v", err)
@@ -787,7 +810,8 @@ func (c *controller) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequ
 			attributes[common.AttributeDiskType] = common.DiskTypeBlockVolume
 		}
 
-		if commonco.ContainerOrchestratorUtility.IsFSSEnabled(ctx, common.ImprovedVolumeVisibility) {
+		if !isSubstrateRequest &&
+			commonco.ContainerOrchestratorUtility.IsFSSEnabled(ctx, common.ImprovedVolumeVisibility) {
 			guestPvcAnnot[common.GuestClusterAnnotKeyVolumeName] = boundPVC.Spec.VolumeName
 			err := patchSupervisorPVCAnnotation(ctx, c.supervisorClient, guestPvcAnnot, supervisorPVCName, c.supervisorNamespace)
 			if err != nil {

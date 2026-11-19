@@ -105,6 +105,8 @@ var pvcsiOnlyFeatures = map[string]string{
 	// gated by the supervisor's CNS focused list-volumes FSS.
 	common.ListVolumes:    "guest ListVolumes reads only supervisor k8s objects, never CNS",
 	common.GuestNFSVolume: "guest-local NFS volumes never involve the supervisor",
+	// Agent Substrate volumes are ordinary Supervisor PVCs; only pvCSI handles them differently.
+	common.AgentSubstrateSupportFSS: "agent substrate volumes are regular supervisor PVCs",
 }
 
 // FSSConfigMapInfo contains details about the FSS configmap(s) present in

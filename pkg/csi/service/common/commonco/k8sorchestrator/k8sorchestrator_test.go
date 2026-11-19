@@ -131,7 +131,7 @@ func TestIsFSSEnabledInGcWithoutSync(t *testing.T) {
 }
 
 // TestIsFSSEnabledInGcPVCSIOnlyFeatures verifies that every feature in pvcsiOnlyFeatures
-// (Windows support, ListVolumes, guest-nfs-volume) is decided by the pvcsi FSS configmap alone:
+// (Windows support, ListVolumes, guest-nfs-volume, agent-substrate-support) is decided by the pvcsi FSS configmap alone:
 // it must read true even when the Supervisor FSS has no entry for it, and false when the pvcsi
 // FSS disables it.
 func TestIsFSSEnabledInGcPVCSIOnlyFeatures(t *testing.T) {
@@ -153,7 +153,8 @@ func TestIsFSSEnabledInGcPVCSIOnlyFeatures(t *testing.T) {
 		}
 	}
 
-	for _, feature := range []string{common.CSIWindowsSupport, common.ListVolumes, common.GuestNFSVolume} {
+	for _, feature := range []string{common.CSIWindowsSupport, common.ListVolumes, common.GuestNFSVolume,
+		common.AgentSubstrateSupportFSS} {
 		if _, ok := pvcsiOnlyFeatures[feature]; !ok {
 			t.Errorf("%s must be listed in pvcsiOnlyFeatures", feature)
 		}

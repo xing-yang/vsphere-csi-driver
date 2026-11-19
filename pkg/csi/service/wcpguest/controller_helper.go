@@ -832,6 +832,27 @@ func vmWatchClosedError(ctx context.Context, operation string, vmName string) (s
 	return csifault.CSIInternalFault, status.Error(code, msg)
 }
 
+// supervisorPVCNameFor returns the name of the Supervisor PVC backing the guest volume
+// requested as volumeName. Guest PV names created by external-provisioner always start
+// with "pvc-", which is replaced by the TKC UID prefix. Agent Substrate volume names
+// ("substrate-<actorUID>-<volumeName>") are kept whole, so the resulting
+// "<tkcUID>-substrate-..." handle stays recognizable (see isSubstrateVolume).
+func supervisorPVCNameFor(tkcUID, volumeName string, isSubstrateRequest bool) string {
+	if isSubstrateRequest {
+		return tkcUID + "-" + volumeName
+	}
+	return tkcUID + "-" + volumeName[4:]
+}
+
+// isSubstrateVolume reports whether volumeHandle (a Supervisor PVC name) belongs to an
+// Agent Substrate volume of this guest cluster. Guest PV-backed handles are
+// "<tkcUID>-<uuid>", which can never start with the Substrate prefix.
+func (c *controller) isSubstrateVolume(ctx context.Context, volumeHandle string) bool {
+	return c.tanzukubernetesClusterUID != "" &&
+		strings.HasPrefix(volumeHandle, c.tanzukubernetesClusterUID+"-"+common.SubstrateVolumeNamePrefix) &&
+		commonco.ContainerOrchestratorUtility.IsFSSEnabled(ctx, common.AgentSubstrateSupportFSS)
+}
+
 // volumeAttachmentName returns the name of the VolumeAttachment object that the
 // Kubernetes attach/detach controller creates for the given volume handle, CSI
 // driver and node. The name is a deterministic hash of those three values,
@@ -848,8 +869,17 @@ func volumeAttachmentName(volumeHandle, driverName, nodeName string) string {
 // VolumeAttachment is gone would strand the volume attached with nothing left
 // to detach it. Fails open: only a definitive NotFound blocks the attach, so a
 // transient API error or missing RBAC rule doesn't fail a legitimate request.
+//
+// Agent Substrate volumes never have a VolumeAttachment: Substrate calls
+// ControllerPublishVolume/ControllerUnpublishVolume itself and is responsible for
+// the detach, so the attach is always treated as still requested.
 func (c *controller) isAttachStillRequested(ctx context.Context, volumeHandle, nodeName string) bool {
 	log := logger.GetLogger(ctx)
+	if c.isSubstrateVolume(ctx, volumeHandle) {
+		log.Debugf("volume %q is an Agent Substrate volume with no VolumeAttachment, "+
+			"attach is requested by Agent Substrate", volumeHandle)
+		return true
+	}
 	vaName := volumeAttachmentName(volumeHandle, csitypes.Name, nodeName)
 	if _, err := c.guestClient.StorageV1().VolumeAttachments().Get(
 		ctx, vaName, metav1.GetOptions{}); err != nil {

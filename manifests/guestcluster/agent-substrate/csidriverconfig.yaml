@@ -1,0 +1,15 @@
+# Registers the vSphere CSI driver with Agent Substrate. The name must match the driver name.
+# serverName is the DNS name Substrate's servicedns signer issues: <service>.<namespace>.svc.
+# The node plugin socket is the default /var/lib/kubelet/plugins/csi.vsphere.vmware.com/csi.sock,
+# so nodeSocketOverride is not needed.
+apiVersion: ate.dev/v1
+kind: CSIDriverConfig
+metadata:
+  name: csi.vsphere.vmware.com
+spec:
+  driverName: csi.vsphere.vmware.com
+  controllerEndpoint: tcp://vsphere-csi-controller-substrate.vmware-system-csi.svc.cluster.local:50052
+  tls:
+    enabled: true
+    usePodIdentity: true
+    serverName: vsphere-csi-controller-substrate.vmware-system-csi.svc

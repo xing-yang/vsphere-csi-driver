@@ -1,0 +1,14 @@
+# Example StorageClass for Agent Substrate external volumes on a VKS cluster. Agent Substrate
+# passes these parameters to CreateVolume as is, so keep only parameters pvCSI accepts.
+# svStorageClass is the Supervisor storage class exposed to the vSphere Namespace. It must
+# map to a datastore that every worker node can reach: Agent Substrate does not request
+# topology, and it may resume an actor on any worker node.
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: vsphere-substrate-block
+provisioner: csi.vsphere.vmware.com
+parameters:
+  svStorageClass: <supervisor-storage-class>
+reclaimPolicy: Delete
+volumeBindingMode: Immediate
